@@ -8,6 +8,7 @@ switch for vendors and backends.
 import enum
 import os
 
+import httpx
 from fastapi.openapi.models import HTTPBearer
 from google.adk.agents import LlmAgent
 from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
@@ -44,11 +45,27 @@ class IntakeResult(BaseModel):
 
     category: Category = Field(description="Exactly one label for the request.")
     request: str = Field(description="The user's request, restated verbatim.")
+    team: str | None = Field(
+        default=None,
+        description="The peer team that owns this request, or null when this team does.",
+    )
 
 
 def build_intake_agent(config: AppConfig) -> LlmAgent:
-    """Classify the incoming request; the graph routes on the label alone."""
+    """Classify the incoming request and name the team that owns it.
+
+    The graph routes on the label and the team alone; both are deterministic
+    code once this agent has spoken.
+    """
     labels = ", ".join(Category)
+    peers = config.a2a.peers
+    team_note = (
+        "Peer teams and what they own:\n"
+        + "\n".join(f"- {peer.name}: {peer.description or 'no description'}" for peer in peers)
+        + "\nSet team to the peer that owns the request, or null when it is ours."
+        if peers
+        else "There are no peer teams; team is always null."
+    )
     return LlmAgent(
         name="intake",
         model=model_for_agent(AgentRole.INTAKE, config),
@@ -58,7 +75,7 @@ def build_intake_agent(config: AppConfig) -> LlmAgent:
             "FEATURE: new behavior or a change to build.\n"
             "BUG: something existing is broken and needs a fix.\n"
             "QUESTION: the user wants information, not a code change.\n"
-            "Return the label and the user's request text verbatim."
+            "Return the label and the user's request text verbatim.\n" + team_note
         ),
         output_schema=IntakeResult,
     )
@@ -92,6 +109,8 @@ def build_peer_agent(peer: PeerConfig) -> RemoteA2aAgent:
         use_legacy=False,
         auth_scheme=scheme,
         auth_credential=credential,
+        # A private CA is the norm between containers; httpx verifies against it.
+        httpx_client=httpx.AsyncClient(verify=str(peer.ca_bundle)) if peer.ca_bundle else None,
     )
 
 

@@ -19,6 +19,7 @@ user request
 │                    │        SPEC → … → DELIVER → PR                   │
 │                    │ QUESTION                                         │
 │                    │   └──▶ qa agent: Memory Bank + A2A peer teams    │
+│                    │ PEER:<team> ──▶ that team's instance over A2A    │
 │                    │ default ──▶ clarify (human input) ──▶ intake     │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -30,7 +31,7 @@ user request
 | Graph-based workflow with routes, a back-edge, and a human-input node | `src/devteam/graph.py` |
 | LiteLLM models: Gemini + Claude, API-key or Agent Platform, with per-model extras | `src/devteam/models.py`, `config/devteam.yaml` |
 | Sessions + Memory Bank, in-memory or Agent Platform, incremental commits | `src/devteam/services.py`, `src/devteam/app.py` |
-| A2A: bearer-protected exposure, peers with the A2A extension | `src/devteam/a2a.py`, `src/devteam/agents.py` |
+| A2A: the full graph exposed over HTTPS + bearer token, peer routing in the graph | `src/devteam/a2a.py`, `src/devteam/graph.py`, `src/devteam/agents.py` |
 | App lifecycle: resumable invocations, reflect-and-retry on tool failure | `src/devteam/app.py` |
 | loop-spec mounted as the change-shipping engine | `src/devteam/loopspec.py` |
 | Per-phase / per-role loop-spec model routing | `loop_spec.phases` / `loop_spec.roles` in the YAML |
@@ -62,7 +63,7 @@ gcloud auth application-default login   # any agent-platform entry
 
 ```sh
 uv run devteam chat "How do we deploy this service?"      # one message through the graph
-uv run devteam serve                                      # expose the qa agent over A2A
+uv run devteam serve                                      # expose this instance over A2A
 uv run devteam supervise "add a healthcheck endpoint"     # unattended loop-spec run → PR
 ```
 
@@ -104,25 +105,38 @@ turn's new events to whichever memory store is active (so Memory Bank extracts
 from fresh material, never the whole session again), and the qa agent reads it
 back with `preload_memory` / `load_memory`.
 
-**A2A teams.** `devteam serve` publishes an agent card at
-`/.well-known/agent-card.json` and requires `Authorization: Bearer
-$DEVTEAM_A2A_TOKEN` on everything else; binding a non-loopback host without a
-token is refused. Only the qa agent is exposed — the loop-spec working agent
-holds an unsandboxed shell and never leaves the process. List other instances
-under `a2a.peers` (each with the token variable to present) and the qa agent
-gains one tool per peer, so questions flow to the team that owns the answer:
+**A2A teams.** Deploy one instance per repository and point them at each
+other. `devteam serve` exposes the whole graph — intake, the loop-spec
+engineer, and Q&A — with an agent card at `/.well-known/agent-card.json`, so
+a feature filed at any instance is shipped by the instance that owns the
+repository: intake names the owning team, the graph's `PEER:<name>` route
+forwards the request whole over A2A, and the peer's own intake and engineer
+take it from there. The qa agent additionally gets one tool per peer for
+questions. Because the surface includes an unsandboxed shell, every request
+except the card must carry `Authorization: Bearer $DEVTEAM_A2A_TOKEN`, and
+binding a non-loopback host without a token is refused. `expose.tls` serves
+HTTPS directly between containers; a peer's `ca_bundle` names the private CA
+that signed its certificate:
 
 ```yaml
 a2a:
-  expose: {host: 0.0.0.0, port: 8001, token_env: DEVTEAM_A2A_TOKEN}
+  expose:
+    host: 0.0.0.0
+    port: 8001
+    token_env: DEVTEAM_A2A_TOKEN
+    tls: {certfile: /etc/devteam/tls/cert.pem, keyfile: /etc/devteam/tls/key.pem}
   peers:
     - name: platform_team
-      url: http://platform.internal:8001
+      url: https://platform-devteam.internal:8001
+      description: Owns the platform service and its deployment pipeline.
       token_env: PLATFORM_TEAM_TOKEN
+      ca_bundle: /etc/devteam/tls/internal-ca.pem
 ```
 
 Peers are consumed with `use_legacy=False`, which activates ADK's A2A
-extension (no duplicated messages or lost nested output in streaming).
+extension (no duplicated messages or lost nested output in streaming). The
+test suite runs this round trip for real on localhost over both HTTP and
+HTTPS with a self-signed certificate.
 
 ## The loop-spec mount
 
@@ -168,14 +182,14 @@ src/devteam/
   models.py             (provider, backend, extra) → LiteLLM id / ADK model
   services.py           session + memory service pair
   agents.py             intake classifier, qa agent, authenticated A2A peers
-  graph.py              the request Workflow graph (routes, human input, back-edge)
+  graph.py              the request Workflow graph (routes, peer forwarding, human input)
   app.py                composition root: Apps, Runner, plugins, resumability
   runtime.py            one turn with get_user_choice answered by a YAML oracle policy
-  a2a.py                A2A server: qa agent only, bearer-token middleware
+  a2a.py                A2A server: full graph, bearer-token middleware, optional TLS
   loopspec.py           loop-spec mount + LOOP_SPEC_* environment
   supervisor.py         unattended loop-spec runs on the four ports
   cli.py                devteam check | chat | serve | supervise
 tests/                  offline suite: scripted LLM through the real graph,
-                        token-protected localhost A2A round trip, port contracts
+                        HTTP + HTTPS localhost A2A round trips incl. peer forwarding
 third_party/loop-spec   the loop-spec checkout (submodule)
 ```

@@ -12,7 +12,7 @@ from google.adk.workflow import DEFAULT_ROUTE
 from devteam import build_app
 from devteam.agents import Category, IntakeResult
 from devteam.config import AppConfig
-from devteam.graph import CHANGE_ROUTE, QUESTION_ROUTE, build_graph, route_request
+from devteam.graph import CHANGE_ROUTE, QUESTION_ROUTE, build_graph, make_router, peer_route
 from devteam.runtime import policy_oracle, run_turn, text_message
 from tests.conftest import ScriptedLlm
 
@@ -20,7 +20,7 @@ from tests.conftest import ScriptedLlm
 def routed(
     node_input: IntakeResult | dict[str, object] | str,
 ) -> tuple[list[bool | int | str], object]:
-    event = route_request(node_input)
+    event = make_router(frozenset({"platform_team"}))(node_input)
     route = event.actions.route
     assert isinstance(route, list)
     return route, event.output
@@ -37,6 +37,16 @@ def test_feature_and_bug_share_the_change_route() -> None:
 def test_question_routes_to_qa_with_the_request_text() -> None:
     verdict = json.dumps({"category": "QUESTION", "request": "how is it deployed?"})
     assert routed(verdict) == ([QUESTION_ROUTE], "how is it deployed?")
+
+
+def test_known_peer_team_wins_over_the_category() -> None:
+    verdict = IntakeResult(category=Category.BUG, request="fix it", team="platform_team")
+    assert routed(verdict) == ([peer_route("platform_team")], "fix it")
+
+
+def test_unknown_team_falls_back_to_the_category() -> None:
+    verdict = IntakeResult(category=Category.BUG, request="fix it", team="nobody")
+    assert routed(verdict) == ([CHANGE_ROUTE], "fix it")
 
 
 def test_unparseable_verdict_takes_the_default_route() -> None:

@@ -140,17 +140,30 @@ class ServicesConfig(_Frozen):
         return self
 
 
+class TlsConfig(_Frozen):
+    """Serve A2A over HTTPS directly (no ingress terminating TLS in front)."""
+
+    certfile: Path
+    keyfile: Path
+
+
 class ExposeConfig(_Frozen):
     """Where this instance serves its own A2A endpoint, and how callers prove themselves.
 
     ``token_env`` names the environment variable holding the bearer token every
     request (except the public agent card) must carry. Unset means no auth —
-    only acceptable on a loopback host.
+    only acceptable on a loopback host, because the exposed graph includes the
+    engineer agent and its shell.
     """
 
     host: str = "127.0.0.1"
     port: int = 8001
     token_env: str | None = "DEVTEAM_A2A_TOKEN"
+    tls: TlsConfig | None = None
+
+    @property
+    def scheme(self) -> str:
+        return "https" if self.tls else "http"
 
 
 class PeerConfig(_Frozen):
@@ -160,6 +173,7 @@ class PeerConfig(_Frozen):
     url: str
     description: str = ""
     token_env: str | None = "DEVTEAM_A2A_TOKEN"  # bearer token we present to this peer
+    ca_bundle: Path | None = None  # CA file that signed the peer's certificate (private PKI)
 
     @property
     def agent_card_url(self) -> str:

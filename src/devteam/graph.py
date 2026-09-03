@@ -1,62 +1,87 @@
-"""The dev-team request graph: classify, route, act.
+"""The dev-team request graph: classify, route, act — locally or on a peer.
 
 The whole control flow is a declared ADK ``Workflow`` graph — the routing
 decision is deterministic code, never a model judgment:
 
-    START -> intake (LLM) -> route_request -+-> CHANGE   -> loop-spec agent
-                                            +-> QUESTION -> qa agent
-                                            +-> default  -> clarify (human input)
-                                                              |
-                                                     back to intake
+    START -> intake (LLM) -> route_request -+-> PEER:<name> -> that team's instance (A2A)
+                                            +-> CHANGE      -> loop-spec engineer agent
+                                            +-> QUESTION    -> qa agent
+                                            +-> default     -> clarify (human input)
+                                                                 |
+                                                        back to intake
 
-Feature and bug work lands on the mounted loop-spec working agent, which runs
-its own graph-driven cycle (SPEC through DELIVER) beneath this one. A request
-the classifier could not place pauses on a human-input node and re-enters
-intake with the user's restatement.
+Every deployed instance runs this same graph, so a request that belongs to
+another team's repository is forwarded whole to that team's instance over
+A2A, where its own intake classifies it and its own engineer ships it.
+Feature and bug work for this team lands on the mounted loop-spec working
+agent, which runs its own graph-driven cycle (SPEC through DELIVER) beneath
+this one.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from google.adk import Event, Workflow
 from google.adk.agents import LlmAgent
 from google.adk.events import EventActions, RequestInput
 from google.adk.workflow import DEFAULT_ROUTE
-from google.genai import types
 
-from .agents import Category, IntakeResult, build_intake_agent, build_qa_agent
+from .agents import Category, IntakeResult, build_intake_agent, build_peer_agent, build_qa_agent
 from .config import AppConfig
 
 # One edge per target: both change-shaped labels share the loop-spec route.
 CHANGE_ROUTE = "CHANGE"
 QUESTION_ROUTE = Category.QUESTION.value
+PEER_ROUTE_PREFIX = "PEER:"
+
+type NodeInput = IntakeResult | dict[str, object] | str
 
 
-def route_for(category: Category) -> str:
-    match category:
+def peer_route(name: str) -> str:
+    return f"{PEER_ROUTE_PREFIX}{name}"
+
+
+def route_for(verdict: IntakeResult, peers: frozenset[str]) -> str:
+    """A known peer team wins; otherwise the category decides."""
+    if verdict.team and verdict.team in peers:
+        return peer_route(verdict.team)
+    match verdict.category:
         case Category.FEATURE | Category.BUG:
             return CHANGE_ROUTE
         case Category.QUESTION:
             return QUESTION_ROUTE
 
 
-def route_request(node_input: IntakeResult | dict[str, object] | str) -> Event:
-    """Turn the classifier's verdict into a graph route, forwarding the request text.
-
-    The next node receives this event's ``output`` as its user turn, so the
-    request — not the label — is what flows on. An unparseable verdict takes
-    the default route with the raw text, so the clarify node can show it.
-    """
+def parse_verdict(node_input: NodeInput) -> IntakeResult | None:
+    """The classifier's verdict in whichever shape the graph hands it over, or None."""
     match node_input:
         case IntakeResult():
-            verdict = node_input
+            return node_input
         case dict():
-            verdict = IntakeResult.model_validate(node_input)
+            return IntakeResult.model_validate(node_input)
         case str():
             try:
-                verdict = IntakeResult.model_validate_json(node_input)
+                return IntakeResult.model_validate_json(node_input)
             except ValueError:
-                return Event(actions=EventActions(route=[DEFAULT_ROUTE]), output=node_input)
-    return Event(actions=EventActions(route=[route_for(verdict.category)]), output=verdict.request)
+                return None
+
+
+def make_router(peers: frozenset[str]) -> Callable[[NodeInput], Event]:
+    """The routing node, closed over the peer names this instance knows.
+
+    The next node receives the event's ``output`` as its user turn, so the
+    request — not the label — is what flows on. An unparseable verdict takes
+    the default route carrying the raw text for the clarify node to show.
+    """
+
+    def route_request(node_input: NodeInput) -> Event:
+        verdict = parse_verdict(node_input)
+        if verdict is None:
+            return Event(actions=EventActions(route=[DEFAULT_ROUTE]), output=node_input)
+        return Event(
+            actions=EventActions(route=[route_for(verdict, peers)]), output=verdict.request
+        )
+
+    return route_request
 
 
 def clarify(node_input: str) -> Iterator[RequestInput]:
@@ -70,26 +95,27 @@ def clarify(node_input: str) -> Iterator[RequestInput]:
     )
 
 
-def user_message(text: str) -> Event:
-    """A user-facing text event for terminal function nodes."""
-    return Event(content=types.Content(role="model", parts=[types.Part(text=text)]))
-
-
 def build_graph(config: AppConfig, loop_spec_agent: LlmAgent) -> Workflow:
     """The root workflow; the caller supplies the mounted loop-spec agent."""
+    peers = {peer.name: build_peer_agent(peer) for peer in config.a2a.peers}
+    route_request = make_router(frozenset(peers))
     intake = build_intake_agent(config)
-    qa_agent = build_qa_agent(config)
     return Workflow(
         name=f"{config.app.name}_workflow",
-        description="Classifies dev-team requests and routes them to the right agent.",
+        description=(
+            "Dev-team assistant: classifies a request, ships features and bugs through "
+            "loop-spec on this team's repository, answers questions from memory, and "
+            "forwards work that belongs to a peer team."
+        ),
         edges=[
             ("START", intake, route_request),
             (
                 route_request,
                 {
                     CHANGE_ROUTE: loop_spec_agent,
-                    QUESTION_ROUTE: qa_agent,
+                    QUESTION_ROUTE: build_qa_agent(config),
                     DEFAULT_ROUTE: clarify,
+                    **{peer_route(name): agent for name, agent in peers.items()},
                 },
             ),
             (clarify, intake),

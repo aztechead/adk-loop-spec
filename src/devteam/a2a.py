@@ -1,10 +1,12 @@
 """Expose this dev-team instance to its peers over A2A.
 
-Peers reach the Q&A agent only. The working agent behind the CHANGE route
-holds an unsandboxed shell, and loop-spec's harness contract says never to
-expose it to untrusted callers — so the A2A surface is the memory-backed
-answerer, and every request except the public agent card must present the
-bearer token named by ``a2a.expose.token_env``.
+Peers reach the whole graph — intake, the loop-spec engineer, and Q&A — so a
+feature filed at one instance can be shipped by the instance that owns the
+repository. That surface includes an unsandboxed shell, which is why every
+request except the public agent card must present the bearer token named by
+``a2a.expose.token_env``, and why serving without one is refused off
+loopback. ``a2a.expose.tls`` serves HTTPS directly for container-to-container
+traffic with no ingress in front.
 """
 
 import os
@@ -12,16 +14,13 @@ from pathlib import Path
 
 import uvicorn
 from google.adk.a2a.utils.agent_to_a2a import to_a2a
-from google.adk.agents import LlmAgent
 from google.adk.agents.remote_a2a_agent import AGENT_CARD_WELL_KNOWN_PATH
-from google.adk.apps import App
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .agents import build_qa_agent
-from .app import MemoryCommitPlugin, runner_for
+from .app import build_app, runner_for
 from .config import AppConfig
 
 
@@ -43,22 +42,19 @@ class BearerAuth:
         await self._app(scope, receive, send)
 
 
-def peer_facing_app(config: AppConfig) -> tuple[App, LlmAgent]:
-    """What peers may talk to: the Q&A agent, no shell, no loop-spec mount."""
-    qa_agent = build_qa_agent(config)
-    return App(name=config.app.name, root_agent=qa_agent, plugins=[MemoryCommitPlugin()]), qa_agent
-
-
 def build_a2a_app(config: AppConfig, project_dir: Path | None = None) -> Starlette | BearerAuth:
-    """The A2A server application, backed by the configured services.
+    """The A2A server application over the full dev-team graph.
 
     The Runner is built here rather than left to ``to_a2a``'s default so the
-    exposed agent shares the same session and memory backend as local runs.
+    exposed graph shares the same session and memory backend as local runs.
     """
     expose = config.a2a.expose
-    app, qa_agent = peer_facing_app(config)
+    app = build_app(config, project_dir)
     runner = runner_for(config, app)
-    server = to_a2a(qa_agent, host=expose.host, port=expose.port, runner=runner)
+    assert app.root_agent is not None
+    server = to_a2a(
+        app.root_agent, host=expose.host, port=expose.port, protocol=expose.scheme, runner=runner
+    )
     token = os.environ.get(expose.token_env) if expose.token_env else None
     if token:
         return BearerAuth(server, token, frozenset({AGENT_CARD_WELL_KNOWN_PATH}))
@@ -71,9 +67,12 @@ def build_a2a_app(config: AppConfig, project_dir: Path | None = None) -> Starlet
 
 
 def serve(config: AppConfig, project_dir: Path | None = None) -> None:
-    """Run the A2A endpoint until interrupted."""
+    """Run the A2A endpoint until interrupted, over HTTPS when tls is configured."""
+    expose = config.a2a.expose
     uvicorn.run(
         build_a2a_app(config, project_dir),
-        host=config.a2a.expose.host,
-        port=config.a2a.expose.port,
+        host=expose.host,
+        port=expose.port,
+        ssl_certfile=str(expose.tls.certfile) if expose.tls else None,
+        ssl_keyfile=str(expose.tls.keyfile) if expose.tls else None,
     )

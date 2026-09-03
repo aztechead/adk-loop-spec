@@ -51,20 +51,31 @@ services:
     agent_engine_id: null # required when backend is agent-platform
 
 a2a:
+  # `devteam serve` exposes the WHOLE graph — intake, the loop-spec engineer
+  # (an unsandboxed shell on this container's repository), and Q&A — so peers
+  # can hand this team the work it owns.
   expose:
     host: 127.0.0.1
     port: 8001
     # Every request except the public agent card must carry
     # `Authorization: Bearer $DEVTEAM_A2A_TOKEN`. Set to null to disable (loopback only).
     token_env: DEVTEAM_A2A_TOKEN
-  # Other deployed devteam instances this one can hand questions to. Each peer
-  # publishes its card at <url>/.well-known/agent-card.json; token_env names
-  # the variable holding the bearer token we present to it.
+    # Serve HTTPS directly between containers (null when an ingress terminates TLS).
+    tls: null
+    # tls:
+    #   certfile: /etc/devteam/tls/cert.pem
+    #   keyfile: /etc/devteam/tls/key.pem
+  # Other deployed devteam instances. Intake names the team that owns a request
+  # and the graph forwards it there whole; the qa agent can also ask them
+  # questions. Each peer publishes its card at <url>/.well-known/agent-card.json;
+  # token_env names the bearer token we present, ca_bundle the CA that signed
+  # its certificate when it is not publicly trusted.
   peers: []
   # - name: platform_team
-  #   url: http://127.0.0.1:8002
-  #   description: The platform team's devteam instance.
+  #   url: https://platform-devteam.internal:8001
+  #   description: Owns the platform service and its deployment pipeline.
   #   token_env: PLATFORM_TEAM_TOKEN
+  #   ca_bundle: /etc/devteam/tls/internal-ca.pem
 
 loop_spec:
   # Path to the loop-spec checkout (the git submodule) and to the CLI mount
