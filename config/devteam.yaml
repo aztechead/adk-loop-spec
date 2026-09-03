@@ -1,0 +1,73 @@
+# Every knob for the dev-team app lives in this file. Environment variables
+# carry secrets only (GOOGLE_API_KEY, ANTHROPIC_API_KEY, gcloud ADC); this file
+# carries shape. `devteam check` validates it without touching any network.
+
+app:
+  name: devteam
+
+models:
+  # A provider entry names one model and where it is served:
+  #   provider: gemini | anthropic
+  #   backend:  api-key        the vendor's own API (GOOGLE_API_KEY / ANTHROPIC_API_KEY)
+  #             agent-platform Google Cloud Agent Platform, formerly Vertex AI (ADC)
+  # Every entry is driven through LiteLLM, so one config swaps vendors and
+  # backends without touching code.
+  providers:
+    gemini-flash:
+      provider: gemini
+      backend: api-key
+      model: gemini-2.5-flash
+    gemini-pro:
+      provider: gemini
+      backend: api-key
+      model: gemini-2.5-pro
+    claude:
+      provider: anthropic
+      backend: api-key
+      model: claude-sonnet-4-5
+    # claude-on-gcp:
+    #   provider: anthropic
+    #   backend: agent-platform
+    #   model: claude-sonnet-4-5@20250929
+
+  # Which provider entry each of this app's own agents uses.
+  agents:
+    intake: gemini-flash
+    qa: claude
+
+services:
+  # in-memory:      no persistence, no cloud, the default; ideal for tests.
+  # agent-platform: Agent Engine sessions + Memory Bank on Google Cloud.
+  backend: in-memory
+  agent_platform:
+    project: null # null -> $GOOGLE_CLOUD_PROJECT
+    location: us-central1
+    agent_engine_id: null # required when backend is agent-platform
+
+a2a:
+  expose:
+    host: 127.0.0.1
+    port: 8001
+  # Other deployed devteam instances this one can hand work to. Each peer
+  # publishes its card at <url>/.well-known/agent-card.json.
+  peers: []
+  # - name: platform_team
+  #   url: http://127.0.0.1:8002
+  #   description: The platform team's devteam instance.
+
+loop_spec:
+  # Path to the loop-spec checkout (the git submodule).
+  root: third_party/loop-spec
+  # Provider entry for the mounted loop-spec working agent.
+  agent: gemini-pro
+  # Optional per-phase and per-role model routing, resolved to LiteLLM ids and
+  # exported as LOOP_SPEC_PHASE_MODEL_<PHASE> / LOOP_SPEC_MODEL_<ROLE>
+  # (docs/loop-spec/configuration.md in the loop-spec tree). A role entry wins
+  # over its phase entry.
+  phases: {}
+  # spec: claude
+  # plan: claude
+  # execute: gemini-pro
+  roles: {}
+  # implementer: gemini-pro
+  # code_reviewer: claude

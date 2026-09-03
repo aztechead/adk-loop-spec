@@ -1,0 +1,3 @@
+[submodule "third_party/loop-spec"]
+	path = third_party/loop-spec
+	url = https://github.com/aztechead/loop-spec.git

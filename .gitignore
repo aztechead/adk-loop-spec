@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Machine-local loop-spec mount (scripts/mount-loop-spec.sh regenerates it)
+adk_agents/
+
+# loop-spec run state
+.loop-spec/
+
+# Secrets
+.env
