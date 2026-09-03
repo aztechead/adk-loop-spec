@@ -1,7 +1,5 @@
 """The supervisor's ports, each testable without a model or a live cycle."""
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 
@@ -9,27 +7,22 @@ import pytest
 from google.adk.events import Event
 from google.genai import types
 
-from devteam.supervisor import (
-    CycleResult,
-    Supervisor,
-    answer_question,
-    ensure_profile,
-    read_last_result,
-)
+from devteam.config import AppConfig, OraclePolicy
+from devteam.runtime import HALT, answer_for, policy_oracle
+from devteam.supervisor import CycleResult, ensure_profile, profile_env, read_last_result
+from tests.conftest import base_raw
 
 
-def test_oracle_takes_the_recommended_option() -> None:
-    options = ["halt", "Ship it (Recommended)", "ask again"]
-    assert answer_question(options) == "Ship it (Recommended)"
+def test_oracle_takes_the_recommended_option_by_default() -> None:
+    choose = policy_oracle(OraclePolicy())
+    assert choose(["halt", "Ship it (Recommended)", "ask again"]) == "Ship it (Recommended)"
+    assert choose(["a", "b"]) == "a"
 
 
-def test_oracle_defaults_to_the_first_option() -> None:
-    assert answer_question(["a", "b"]) == "a"
-
-
-def test_result_reading_fails_loudly_when_absent(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="died before producing a result"):
-        read_last_result(tmp_path)
+def test_oracle_policy_prefers_and_halts_from_yaml() -> None:
+    choose = policy_oracle(OraclePolicy(prefer=("compact",), halt_when=("delete",)))
+    assert choose(["Full cycle (Recommended)", "Run compact cycle"]) == "Run compact cycle"
+    assert choose(["Keep (Recommended)", "delete the directory"]) == HALT
 
 
 def test_success_requires_outcome_and_convergence() -> None:
@@ -41,15 +34,40 @@ def test_success_requires_outcome_and_convergence() -> None:
     assert not failed.succeeded
 
 
-def test_profile_is_written_once_and_never_clobbered(tmp_path: Path) -> None:
-    path = ensure_profile(tmp_path)
-    written = json.loads(path.read_text())
-    assert written["preset"] == "supervised"
-    assert written["env"]["LOOP_SPEC_PHASE_HANDOFF"] == "1"
+def test_profile_names_the_store_and_sink_adapters(tmp_path: Path) -> None:
+    raw = base_raw() | {
+        "loop_spec": {
+            "supervisor": {
+                "store_dir": str(tmp_path / "mirror"),
+                "events_file": str(tmp_path / "e.jsonl"),
+            }
+        }
+    }
+    env = profile_env(AppConfig.model_validate(raw))
+    assert env["LOOP_SPEC_STORE"].endswith("lib/supervisor/store-mirror.sh")
+    assert env["LOOP_SPEC_STORE_DIR"] == str(tmp_path / "mirror")
+    assert env["LOOP_SPEC_EVENT_SINK"].endswith("examples/supervisor/append-sink.sh")
+    assert env["LOOP_SPEC_EVENT_SINK_FILE"] == str(tmp_path / "e.jsonl")
+
+
+def test_profile_is_written_validated_and_never_clobbered(
+    config: AppConfig, tmp_path: Path
+) -> None:
+    path = ensure_profile(config, tmp_path)
+    assert json.loads(path.read_text()) == {"preset": "supervised", "env": {}}
 
     path.write_text('{"preset": "interactive"}')
-    ensure_profile(tmp_path)
+    ensure_profile(config, tmp_path)
     assert json.loads(path.read_text()) == {"preset": "interactive"}
+
+    path.write_text('{"preset": "no-such-preset"}')
+    with pytest.raises(RuntimeError, match="rejected"):
+        ensure_profile(config, tmp_path)
+
+
+def test_missing_result_is_reconciled_or_fails_loudly(config: AppConfig, tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="cycle-reconcile"):
+        read_last_result(config, tmp_path)
 
 
 def pending_choice_event(options: list[str]) -> Event:
@@ -62,9 +80,10 @@ def pending_choice_event(options: list[str]) -> Event:
 
 
 def test_pending_question_gets_a_function_response() -> None:
-    event = pending_choice_event(["Proceed (Recommended)", "halt"])
-    reply = Supervisor._maybe_answer(event)
-    assert reply is not None
+    reply = answer_for(
+        pending_choice_event(["Proceed (Recommended)", "halt"]), policy_oracle(OraclePolicy())
+    )
+    assert reply is not None and reply.parts
     response = reply.parts[0].function_response
     assert response is not None
     assert response.id == "call-1"
@@ -73,9 +92,9 @@ def test_pending_question_gets_a_function_response() -> None:
 
 def test_ordinary_events_get_no_response() -> None:
     event = Event(author="loop_spec", content=types.Content(role="model", parts=[]))
-    assert Supervisor._maybe_answer(event) is None
+    assert answer_for(event, policy_oracle(OraclePolicy())) is None
 
 
 def test_empty_options_are_an_error() -> None:
     with pytest.raises(ValueError, match="carried no options"):
-        Supervisor._maybe_answer(pending_choice_event([]))
+        answer_for(pending_choice_event([]), policy_oracle(OraclePolicy()))

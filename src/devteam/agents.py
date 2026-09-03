@@ -5,16 +5,24 @@ choice always flows through :mod:`devteam.models` so YAML stays the single
 switch for vendors and backends.
 """
 
-from __future__ import annotations
-
 import enum
+import os
 
+from fastapi.openapi.models import HTTPBearer
 from google.adk.agents import LlmAgent
 from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
+from google.adk.auth.auth_credential import (
+    AuthCredential,
+    AuthCredentialTypes,
+    HttpAuth,
+    HttpCredentials,
+)
+from google.adk.auth.auth_schemes import AuthScheme
 from google.adk.tools import load_memory, preload_memory
 from google.adk.tools.agent_tool import AgentTool
+from pydantic import BaseModel, Field
 
-from .config import AppConfig
+from .config import AgentRole, AppConfig, PeerConfig
 from .models import model_for_agent
 
 
@@ -26,34 +34,65 @@ class Category(enum.StrEnum):
     QUESTION = "QUESTION"
 
 
+class IntakeResult(BaseModel):
+    """The classifier's structured verdict: a label plus the request it labeled.
+
+    Carrying the request forward matters because a Workflow hands each node
+    only the previous node's output — the agents downstream need the user's
+    words, not just the label.
+    """
+
+    category: Category = Field(description="Exactly one label for the request.")
+    request: str = Field(description="The user's request, restated verbatim.")
+
+
 def build_intake_agent(config: AppConfig) -> LlmAgent:
-    """Classify the incoming request; the graph routes on this label alone."""
+    """Classify the incoming request; the graph routes on the label alone."""
     labels = ", ".join(Category)
     return LlmAgent(
         name="intake",
-        model=model_for_agent("intake", config),
+        model=model_for_agent(AgentRole.INTAKE, config),
         description="Classifies a dev-team request as a feature, a bug, or a question.",
         instruction=(
             f"Classify the user's request as exactly one of: {labels}.\n"
             "FEATURE: new behavior or a change to build.\n"
             "BUG: something existing is broken and needs a fix.\n"
             "QUESTION: the user wants information, not a code change.\n"
-            "Reply with the single label only, nothing else."
+            "Return the label and the user's request text verbatim."
         ),
-        output_schema=str,
+        output_schema=IntakeResult,
     )
 
 
-def build_peer_agents(config: AppConfig) -> list[RemoteA2aAgent]:
-    """One remote agent per configured peer — other deployed devteam instances."""
-    return [
-        RemoteA2aAgent(
-            name=peer.name,
-            agent_card=peer.agent_card_url,
-            description=peer.description or f"The {peer.name} devteam instance, over A2A.",
-        )
-        for peer in config.a2a.peers
-    ]
+def _bearer(token_env: str | None) -> tuple[AuthScheme | None, AuthCredential | None]:
+    """The auth pair presented to a peer, or nothing when no token is configured."""
+    token = os.environ.get(token_env) if token_env else None
+    if not token:
+        return None, None
+    return (
+        HTTPBearer(),
+        AuthCredential(
+            auth_type=AuthCredentialTypes.HTTP,
+            http=HttpAuth(scheme="bearer", credentials=HttpCredentials(token=token)),
+        ),
+    )
+
+
+def build_peer_agent(peer: PeerConfig) -> RemoteA2aAgent:
+    """One remote agent for a configured peer — another deployed devteam instance.
+
+    ``use_legacy=False`` activates ADK's A2A extension, which fixes message
+    duplication and nested-output loss in streaming exchanges.
+    """
+    scheme, credential = _bearer(peer.token_env)
+    return RemoteA2aAgent(
+        name=peer.name,
+        agent_card=peer.agent_card_url,
+        description=peer.description or f"The {peer.name} devteam instance, over A2A.",
+        use_legacy=False,
+        auth_scheme=scheme,
+        auth_credential=credential,
+    )
 
 
 def build_qa_agent(config: AppConfig) -> LlmAgent:
@@ -62,8 +101,9 @@ def build_qa_agent(config: AppConfig) -> LlmAgent:
     Memory Bank supplies recall (preload for ambient context, load_memory for
     explicit search); each A2A peer is wrapped as a tool so one question can be
     handed to another deployed instance and its answer folded into ours.
+    This is also the only agent exposed to peers over A2A: it holds no shell.
     """
-    peers = build_peer_agents(config)
+    peers = [build_peer_agent(peer) for peer in config.a2a.peers]
     peer_note = (
         "When the question concerns another team's system, ask that team's "
         f"agent tool ({', '.join(peer.name for peer in peers)}) and credit its answer."
@@ -72,7 +112,7 @@ def build_qa_agent(config: AppConfig) -> LlmAgent:
     )
     return LlmAgent(
         name="qa",
-        model=model_for_agent("qa", config),
+        model=model_for_agent(AgentRole.QA, config),
         description="Answers dev-team questions from project memory and peer teams.",
         instruction=(
             "Answer the user's question about this project and team.\n"

@@ -5,8 +5,6 @@ the environment. Validation happens here, at load time, so every other module
 receives a fully-checked :class:`AppConfig` and never re-parses anything.
 """
 
-from __future__ import annotations
-
 import enum
 from pathlib import Path
 from typing import Self
@@ -27,6 +25,13 @@ class Backend(enum.StrEnum):
 
     API_KEY = "api-key"  # the vendor's own API, authenticated by API key
     AGENT_PLATFORM = "agent-platform"  # Google Cloud Agent Platform (formerly Vertex AI)
+
+
+class AgentRole(enum.StrEnum):
+    """This app's own LLM agents; each needs a model in models.agents."""
+
+    INTAKE = "intake"
+    QA = "qa"
 
 
 class ServiceBackend(enum.StrEnum):
@@ -63,6 +68,9 @@ class LoopSpecRole(enum.StrEnum):
     PATTERN_MAPPER = "pattern_mapper"
 
 
+type Scalar = str | int | float | bool
+
+
 class _Frozen(BaseModel):
     """Immutable, no-extras base for every config node."""
 
@@ -70,21 +78,29 @@ class _Frozen(BaseModel):
 
 
 class ModelSpec(_Frozen):
-    """One nameable model: a vendor, a serving backend, and a model id."""
+    """One nameable model: a vendor, a serving backend, and a model id.
+
+    ``extra`` is passed verbatim to LiteLLM (``thinking``, ``temperature``,
+    ``api_base``, ...) so generation settings live beside the model they tune.
+    """
 
     provider: Provider
     backend: Backend
     model: str
+    extra: dict[str, Scalar | dict[str, Scalar]] = {}
 
 
 class ModelsConfig(_Frozen):
     """The provider registry plus the provider each in-app agent uses."""
 
     providers: dict[str, ModelSpec]
-    agents: dict[str, str]
+    agents: dict[AgentRole, str]
 
     @model_validator(mode="after")
-    def _agents_name_known_providers(self) -> Self:
+    def _every_agent_has_a_known_provider(self) -> Self:
+        missing = [role for role in AgentRole if role not in self.agents]
+        if missing:
+            raise ValueError(f"models.agents must name a provider for: {sorted(missing)}")
         for agent, provider_key in self.agents.items():
             if provider_key not in self.providers:
                 raise ValueError(
@@ -93,7 +109,7 @@ class ModelsConfig(_Frozen):
                 )
         return self
 
-    def spec_for_agent(self, agent: str) -> ModelSpec:
+    def spec_for_agent(self, agent: AgentRole) -> ModelSpec:
         return self.providers[self.agents[agent]]
 
 
@@ -125,10 +141,16 @@ class ServicesConfig(_Frozen):
 
 
 class ExposeConfig(_Frozen):
-    """Where this instance serves its own A2A endpoint."""
+    """Where this instance serves its own A2A endpoint, and how callers prove themselves.
+
+    ``token_env`` names the environment variable holding the bearer token every
+    request (except the public agent card) must carry. Unset means no auth —
+    only acceptable on a loopback host.
+    """
 
     host: str = "127.0.0.1"
     port: int = 8001
+    token_env: str | None = "DEVTEAM_A2A_TOKEN"
 
 
 class PeerConfig(_Frozen):
@@ -137,6 +159,7 @@ class PeerConfig(_Frozen):
     name: str
     url: str
     description: str = ""
+    token_env: str | None = "DEVTEAM_A2A_TOKEN"  # bearer token we present to this peer
 
     @property
     def agent_card_url(self) -> str:
@@ -148,17 +171,44 @@ class A2AConfig(_Frozen):
     peers: tuple[PeerConfig, ...] = ()
 
 
+class OraclePolicy(_Frozen):
+    """How the supervisor answers loop-spec's interview questions.
+
+    Options are matched by substring, first rule wins: ``halt_when`` pauses the
+    cycle (loop-spec's ``halt`` answer), ``prefer`` picks a non-default option,
+    and anything else takes the ``(Recommended)`` option, which loop-spec
+    records as an assumed self-answer.
+    """
+
+    halt_when: tuple[str, ...] = ()
+    prefer: tuple[str, ...] = ()
+    pins: dict[str, str] = {}  # LOOP_SPEC_ANSWER_<KEY> pre-answers, never re-asked
+
+
+class SupervisorConfig(_Frozen):
+    """Policy for unattended runs: the four ports' knobs."""
+
+    oracle: OraclePolicy = OraclePolicy()
+    store_dir: Path | None = None  # mirror feature state here (state-store port)
+    events_file: Path | None = None  # append every cycle event here (event-sink port)
+    max_handoffs: int = 25
+
+
 class LoopSpecConfig(_Frozen):
     """The loop-spec mount: where the checkout lives and which models drive it."""
 
     root: Path = Path("third_party/loop-spec")
+    mount: Path = Path("adk_agents")  # where scripts/mount-loop-spec.sh writes the CLI agents
     agent: str = "gemini-pro"
     phases: dict[LoopSpecPhase, str] = {}
     roles: dict[LoopSpecRole, str] = {}
+    supervisor: SupervisorConfig = SupervisorConfig()
 
 
 class AppMeta(_Frozen):
     name: str = "devteam"
+    tool_retries: int = 3  # ReflectAndRetryToolPlugin budget per tool
+    resumable: bool = True  # App.resumability_config
 
 
 class AppConfig(_Frozen):

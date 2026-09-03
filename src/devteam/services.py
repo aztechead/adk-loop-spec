@@ -6,10 +6,8 @@ durable sessions plus Memory Bank. Both sides of the pair always come from the
 same backend so a session and its extracted memories never split across stores.
 """
 
-from __future__ import annotations
-
 import os
-from typing import NamedTuple
+from typing import NamedTuple, assert_never
 
 from google.adk.memory import BaseMemoryService, InMemoryMemoryService, VertexAiMemoryBankService
 from google.adk.sessions import BaseSessionService, InMemorySessionService, VertexAiSessionService
@@ -41,12 +39,17 @@ def build_services(config: AppConfig) -> RunnerServices:
                     "services.backend is agent-platform but neither "
                     "services.agent_platform.project nor $GOOGLE_CLOUD_PROJECT is set"
                 )
-            coordinates = {
-                "project": project,
-                "location": platform.location,
-                "agent_engine_id": platform.agent_engine_id,
-            }
             return RunnerServices(
-                VertexAiSessionService(**coordinates),
-                VertexAiMemoryBankService(**coordinates),
+                VertexAiSessionService(
+                    project=project,
+                    location=platform.location,
+                    agent_engine_id=platform.agent_engine_id,
+                ),
+                VertexAiMemoryBankService(
+                    project=project,
+                    location=platform.location,
+                    agent_engine_id=platform.agent_engine_id,
+                ),
             )
+        case _:
+            assert_never(config.services.backend)

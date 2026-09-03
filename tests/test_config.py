@@ -1,32 +1,31 @@
 """The YAML schema: what it accepts, and how it refuses bad shapes."""
 
-from __future__ import annotations
-
 import pytest
 from pydantic import ValidationError
 
-from devteam.config import AppConfig, ServiceBackend
-
-
-def base_raw() -> dict[str, object]:
-    return {
-        "models": {
-            "providers": {
-                "gemini-pro": {
-                    "provider": "gemini",
-                    "backend": "api-key",
-                    "model": "gemini-2.5-pro",
-                }
-            },
-            "agents": {"intake": "gemini-pro", "qa": "gemini-pro"},
-        }
-    }
+from devteam.config import AgentRole, AppConfig, ServiceBackend
+from tests.conftest import base_raw
 
 
 def test_shipped_config_loads(config: AppConfig) -> None:
     assert config.app.name == "devteam"
     assert config.services.backend is ServiceBackend.IN_MEMORY
-    assert config.models.spec_for_agent("intake").model
+    assert config.models.spec_for_agent(AgentRole.INTAKE).model
+    assert config.models.spec_for_agent(AgentRole.QA).extra == {"thinking": {"type": "adaptive"}}
+
+
+def test_every_agent_role_needs_a_provider() -> None:
+    raw = base_raw()
+    del raw["models"]["agents"]["qa"]  # type: ignore[index]
+    with pytest.raises(ValidationError, match="must name a provider for"):
+        AppConfig.model_validate(raw)
+
+
+def test_unknown_agent_role_is_refused() -> None:
+    raw = base_raw()
+    raw["models"]["agents"]["qaa"] = "gemini-pro"  # type: ignore[index]
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(raw)
 
 
 def test_unknown_agent_provider_is_refused() -> None:

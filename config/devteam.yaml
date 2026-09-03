@@ -1,36 +1,42 @@
 # Every knob for the dev-team app lives in this file. Environment variables
-# carry secrets only (GOOGLE_API_KEY, ANTHROPIC_API_KEY, gcloud ADC); this file
-# carries shape. `devteam check` validates it without touching any network.
+# carry secrets only (GOOGLE_API_KEY, ANTHROPIC_API_KEY, DEVTEAM_A2A_TOKEN,
+# gcloud ADC); this file carries shape. A .env file in the working directory is
+# loaded automatically. `devteam check` validates it without touching any network.
 
 app:
   name: devteam
+  tool_retries: 3 # failed tool calls are reflected on and retried this many times
+  resumable: true # interrupted invocations can be resumed by id
 
 models:
   # A provider entry names one model and where it is served:
   #   provider: gemini | anthropic
   #   backend:  api-key        the vendor's own API (GOOGLE_API_KEY / ANTHROPIC_API_KEY)
   #             agent-platform Google Cloud Agent Platform, formerly Vertex AI (ADC)
+  #   extra:    passed verbatim to LiteLLM (thinking, temperature, api_base, ...)
   # Every entry is driven through LiteLLM, so one config swaps vendors and
   # backends without touching code.
   providers:
     gemini-flash:
       provider: gemini
       backend: api-key
-      model: gemini-2.5-flash
+      model: gemini-3.8-flash
     gemini-pro:
       provider: gemini
       backend: api-key
-      model: gemini-2.5-pro
+      model: gemini-3.1-pro-preview
     claude:
       provider: anthropic
       backend: api-key
-      model: claude-sonnet-4-5
+      model: claude-opus-5
+      extra:
+        thinking: { type: adaptive }
     # claude-on-gcp:
     #   provider: anthropic
     #   backend: agent-platform
-    #   model: claude-sonnet-4-5@20250929
+    #   model: claude-opus-5        # current-generation Claude uses bare ids on Agent Platform
 
-  # Which provider entry each of this app's own agents uses.
+  # Which provider entry each of this app's own agents uses (intake, qa).
   agents:
     intake: gemini-flash
     qa: claude
@@ -48,16 +54,23 @@ a2a:
   expose:
     host: 127.0.0.1
     port: 8001
-  # Other deployed devteam instances this one can hand work to. Each peer
-  # publishes its card at <url>/.well-known/agent-card.json.
+    # Every request except the public agent card must carry
+    # `Authorization: Bearer $DEVTEAM_A2A_TOKEN`. Set to null to disable (loopback only).
+    token_env: DEVTEAM_A2A_TOKEN
+  # Other deployed devteam instances this one can hand questions to. Each peer
+  # publishes its card at <url>/.well-known/agent-card.json; token_env names
+  # the variable holding the bearer token we present to it.
   peers: []
   # - name: platform_team
   #   url: http://127.0.0.1:8002
   #   description: The platform team's devteam instance.
+  #   token_env: PLATFORM_TEAM_TOKEN
 
 loop_spec:
-  # Path to the loop-spec checkout (the git submodule).
+  # Path to the loop-spec checkout (the git submodule) and to the CLI mount
+  # scripts/mount-loop-spec.sh writes (loop-spec's fleet rung runs `adk run` there).
   root: third_party/loop-spec
+  mount: adk_agents
   # Provider entry for the mounted loop-spec working agent.
   agent: gemini-pro
   # Optional per-phase and per-role model routing, resolved to LiteLLM ids and
@@ -71,3 +84,13 @@ loop_spec:
   roles: {}
   # implementer: gemini-pro
   # code_reviewer: claude
+
+  # Policy for `devteam supervise` (loop-spec's supervisor interface).
+  supervisor:
+    oracle:
+      halt_when: [] # option substrings that pause the cycle for a human
+      prefer: [] # option substrings to pick over the recommended one
+      pins: {} # LOOP_SPEC_ANSWER_<KEY>: value, answered before any question
+    store_dir: null # mirror feature state here so an ephemeral container survives death
+    events_file: null # append every cycle event line here
+    max_handoffs: 25

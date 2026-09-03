@@ -1,10 +1,14 @@
 """Shared fixtures: every test runs offline with dummy credentials."""
 
-from __future__ import annotations
-
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import pytest
+from google.adk.models import BaseLlm
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
+from google.genai import types
+from pydantic import Field
 
 from devteam.config import AppConfig, load_config
 
@@ -22,3 +26,46 @@ def dummy_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
 def config() -> AppConfig:
     """The shipped config file, so tests validate what users actually run."""
     return load_config(REPO_ROOT / "config" / "devteam.yaml")
+
+
+def base_raw() -> dict[str, object]:
+    """The smallest valid config mapping, for tests that vary one section."""
+    return {
+        "models": {
+            "providers": {
+                "gemini-pro": {
+                    "provider": "gemini",
+                    "backend": "api-key",
+                    "model": "gemini-2.5-pro",
+                }
+            },
+            "agents": {"intake": "gemini-pro", "qa": "gemini-pro"},
+        }
+    }
+
+
+class ScriptedLlm(BaseLlm):
+    """A model that replies from a script and records every request.
+
+    ``script`` maps a substring of an agent's instruction to the text that
+    agent answers with; ``requests`` keeps each LlmRequest so a test can
+    assert what an agent was shown.
+    """
+
+    script: dict[str, str]
+    requests: list[LlmRequest] = Field(default_factory=list)
+
+    @classmethod
+    def supported_models(cls) -> list[str]:
+        return ["scripted"]
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse]:
+        self.requests.append(llm_request)
+        instruction = str(llm_request.config.system_instruction or "") if llm_request.config else ""
+        text = next((reply for key, reply in self.script.items() if key in instruction), "")
+        yield LlmResponse(
+            content=types.Content(role="model", parts=[types.Part(text=text)]),
+            turn_complete=True,
+        )

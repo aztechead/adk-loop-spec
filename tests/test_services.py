@@ -1,14 +1,12 @@
 """Service construction: the in-memory pair, and agent-platform's guard rails."""
 
-from __future__ import annotations
-
 import pytest
 from google.adk.memory import InMemoryMemoryService
 from google.adk.sessions import InMemorySessionService
 
 from devteam.config import AppConfig
 from devteam.services import build_services
-from tests.test_config import base_raw
+from tests.conftest import base_raw
 
 
 def test_in_memory_pair(config: AppConfig) -> None:

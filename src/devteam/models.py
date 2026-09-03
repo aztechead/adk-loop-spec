@@ -12,13 +12,12 @@ ADK's own registry resolves any ``provider/model`` string through LiteLLM too,
 which is why :func:`litellm_id` strings are also valid loop-spec model routes.
 """
 
-from __future__ import annotations
-
 import os
+from typing import assert_never
 
 from google.adk.models.lite_llm import LiteLlm
 
-from .config import AppConfig, Backend, ModelSpec, Provider
+from .config import AgentRole, AppConfig, Backend, ModelSpec, Provider
 
 # Serving Gemini through LiteLLM is this app's deliberate design (one connector
 # for every vendor and backend), so ADK's advisory to switch to native Gemini
@@ -42,12 +41,14 @@ class MissingCredentialsError(RuntimeError):
 
 
 def litellm_id(spec: ModelSpec) -> str:
-    """The LiteLLM model string for a spec, e.g. ``anthropic/claude-sonnet-4-5``."""
+    """The LiteLLM model string for a spec, e.g. ``anthropic/claude-opus-5``."""
     match spec.backend:
         case Backend.AGENT_PLATFORM:
             prefix = "vertex_ai"
         case Backend.API_KEY:
             prefix = spec.provider.value
+        case _:
+            assert_never(spec.backend)
     return f"{prefix}/{spec.model}"
 
 
@@ -63,18 +64,18 @@ def require_credentials(spec: ModelSpec) -> None:
 
 
 def build_model(spec: ModelSpec, config: AppConfig) -> LiteLlm:
-    """An ADK model object for a spec, carrying Agent Platform coordinates when needed."""
+    """An ADK model object for a spec, carrying its extras and platform coordinates."""
     require_credentials(spec)
+    kwargs: dict[str, object] = dict(spec.extra)
     if spec.backend is Backend.AGENT_PLATFORM:
         platform = config.services.agent_platform
-        return LiteLlm(
-            model=litellm_id(spec),
-            vertex_project=platform.project or os.environ.get("GOOGLE_CLOUD_PROJECT"),
-            vertex_location=platform.location,
+        kwargs.setdefault(
+            "vertex_project", platform.project or os.environ.get("GOOGLE_CLOUD_PROJECT")
         )
-    return LiteLlm(model=litellm_id(spec))
+        kwargs.setdefault("vertex_location", platform.location)
+    return LiteLlm(model=litellm_id(spec), **kwargs)
 
 
-def model_for_agent(agent: str, config: AppConfig) -> LiteLlm:
+def model_for_agent(agent: AgentRole, config: AppConfig) -> LiteLlm:
     """The model object for one of this app's own agents (models.agents in YAML)."""
     return build_model(config.models.spec_for_agent(agent), config)

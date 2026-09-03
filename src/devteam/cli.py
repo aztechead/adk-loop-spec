@@ -4,17 +4,15 @@ Thin by design — each subcommand parses arguments, loads config, and calls one
 function from the module that owns the behavior.
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import sys
 from pathlib import Path
 
-from google.genai import types
+from dotenv import load_dotenv
 
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
-from .loopspec import model_routes
+from .loopspec import AGENT_DIR_VAR, environment
 from .models import litellm_id
 
 
@@ -28,20 +26,26 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--project-dir",
         type=Path,
-        default=None,
+        default=Path.cwd(),
         help="repository loop-spec works on (default: current directory)",
     )
 
 
-def cmd_check(config: AppConfig, _: argparse.Namespace) -> int:
-    """Validate the config and show every resolved model route. No network."""
+def cmd_check(config: AppConfig, args: argparse.Namespace) -> int:
+    """Validate the config and show every resolved route. No network."""
     print(f"app: {config.app.name}")
     print(f"services: {config.services.backend}")
     for agent, provider_key in sorted(config.models.agents.items()):
         print(f"agent {agent}: {litellm_id(config.models.providers[provider_key])}")
     print(f"loop-spec agent: {litellm_id(config.models.providers[config.loop_spec.agent])}")
-    for name, value in sorted(model_routes(config).items()):
+    env = environment(config, args.project_dir)
+    for name, value in sorted(env.items()):
         print(f"{name}={value}")
+    if AGENT_DIR_VAR not in env:
+        print(
+            f"warning: no CLI mount under {config.loop_spec.mount}; loop-spec's fleet rung "
+            "needs `bash scripts/mount-loop-spec.sh`"
+        )
     for peer in config.a2a.peers:
         print(f"peer {peer.name}: {peer.agent_card_url}")
     print("config: ok")
@@ -51,28 +55,31 @@ def cmd_check(config: AppConfig, _: argparse.Namespace) -> int:
 def cmd_chat(config: AppConfig, args: argparse.Namespace) -> int:
     """Send one message through the request graph and print the responses."""
     from .app import build_runner  # deferred: builds the loop-spec mount
+    from .runtime import policy_oracle, run_turn, text_message
 
     async def run() -> None:
         runner = build_runner(config, args.project_dir)
         session = await runner.session_service.create_session(
             app_name=runner.app_name, user_id=args.user
         )
-        message = types.Content(role="user", parts=[types.Part(text=args.message)])
-        async for event in runner.run_async(
-            user_id=args.user, session_id=session.id, new_message=message
+        async for event in run_turn(
+            runner,
+            user_id=args.user,
+            session_id=session.id,
+            message=text_message(args.message),
+            oracle=policy_oracle(config.loop_spec.supervisor.oracle),
         ):
-            if event.content and event.content.parts:
-                for part in event.content.parts:
-                    if part.text:
-                        print(f"[{event.author}] {part.text}")
+            for part in (event.content.parts if event.content else None) or []:
+                if part.text:
+                    print(f"[{event.author}] {part.text}")
 
     asyncio.run(run())
     return 0
 
 
 def cmd_serve(config: AppConfig, args: argparse.Namespace) -> int:
-    """Expose this instance to its peers over A2A."""
-    from .a2a import serve  # deferred: builds the loop-spec mount
+    """Expose this instance's Q&A agent to its peers over A2A."""
+    from .a2a import serve  # deferred: builds services
 
     serve(config, args.project_dir)
     return 0
@@ -82,8 +89,7 @@ def cmd_supervise(config: AppConfig, args: argparse.Namespace) -> int:
     """Run one loop-spec task unattended and report the terminal verdict."""
     from .supervisor import Supervisor  # deferred: builds the loop-spec mount
 
-    project_dir = (args.project_dir or Path.cwd()).resolve()
-    result = asyncio.run(Supervisor(config, project_dir).run(args.task))
+    result = asyncio.run(Supervisor(config, args.project_dir.resolve()).run(args.task))
     print(
         f"outcome={result.outcome} converged={result.converged} "
         f"phase={result.phase_reached} handoffs={result.handoffs}"
@@ -92,6 +98,7 @@ def cmd_supervise(config: AppConfig, args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv()  # secrets from ./.env, never overriding what the shell already set
     parser = argparse.ArgumentParser(prog="devteam", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 

@@ -1,17 +1,15 @@
-"""The loop-spec mount: model routing onto its env contract, and the loader."""
-
-from __future__ import annotations
+"""The loop-spec mount: YAML onto its environment contract, and the loader."""
 
 from pathlib import Path
 
 import pytest
 
 from devteam.config import AppConfig
-from devteam.loopspec import build_working_agent, load_extension, model_routes
-from tests.test_config import base_raw
+from devteam.loopspec import AGENT_DIR_VAR, build_working_agent, environment, load_extension
+from tests.conftest import base_raw
 
 
-def test_model_routes_follow_the_loop_spec_contract() -> None:
+def test_environment_follows_the_loop_spec_contract(tmp_path: Path) -> None:
     raw = base_raw() | {
         "models": {
             "providers": {
@@ -23,7 +21,7 @@ def test_model_routes_follow_the_loop_spec_contract() -> None:
                 "claude": {
                     "provider": "anthropic",
                     "backend": "api-key",
-                    "model": "claude-sonnet-4-5",
+                    "model": "claude-opus-5",
                 },
             },
             "agents": {"intake": "gemini-pro", "qa": "claude"},
@@ -31,16 +29,25 @@ def test_model_routes_follow_the_loop_spec_contract() -> None:
         "loop_spec": {
             "phases": {"spec": "claude", "plan": "claude", "execute": "gemini-pro"},
             "roles": {"implementer": "gemini-pro", "code_reviewer": "claude"},
+            "supervisor": {"oracle": {"pins": {"style": "compact"}}},
         },
     }
-    routes = model_routes(AppConfig.model_validate(raw))
-    assert routes == {
-        "LOOP_SPEC_PHASE_MODEL_SPEC": "anthropic/claude-sonnet-4-5",
-        "LOOP_SPEC_PHASE_MODEL_PLAN": "anthropic/claude-sonnet-4-5",
+    assert environment(AppConfig.model_validate(raw), tmp_path) == {
+        "LOOP_SPEC_PHASE_MODEL_SPEC": "anthropic/claude-opus-5",
+        "LOOP_SPEC_PHASE_MODEL_PLAN": "anthropic/claude-opus-5",
         "LOOP_SPEC_PHASE_MODEL_EXECUTE": "gemini/gemini-2.5-pro",
         "LOOP_SPEC_MODEL_IMPLEMENTER": "gemini/gemini-2.5-pro",
-        "LOOP_SPEC_MODEL_CODE_REVIEWER": "anthropic/claude-sonnet-4-5",
+        "LOOP_SPEC_MODEL_CODE_REVIEWER": "anthropic/claude-opus-5",
+        "LOOP_SPEC_ANSWER_STYLE": "compact",
     }
+
+
+def test_cli_mount_is_exported_when_present(config: AppConfig, tmp_path: Path) -> None:
+    assert AGENT_DIR_VAR not in environment(config, tmp_path)
+    mount = tmp_path / config.loop_spec.mount / "loop_spec"
+    mount.mkdir(parents=True)
+    (mount / "agent.py").write_text("app = None\n")
+    assert environment(config, tmp_path)[AGENT_DIR_VAR] == str(mount)
 
 
 def test_missing_checkout_fails_with_the_fix(tmp_path: Path) -> None:
