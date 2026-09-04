@@ -13,6 +13,7 @@ run that died before writing its result is reconciled with loop-spec's own
 """
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -94,10 +95,20 @@ class Checklist(BaseModel):
         return len(self.items)
 
 
-def run_script(root: Path, script: Path, *args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
-    """Run one of loop-spec's bash scripts from the checkout at ``root``."""
+def run_script(
+    root: Path, script: Path, *args: str, cwd: Path, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run one of loop-spec's bash scripts from the checkout at ``root``.
+
+    ``env`` adds to the inherited environment; it never replaces it.
+    """
     return subprocess.run(
-        ["bash", str(root / script), *args], cwd=cwd, capture_output=True, text=True, check=False
+        ["bash", str(root / script), *args],
+        cwd=cwd,
+        env={**os.environ, **env} if env else None,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 

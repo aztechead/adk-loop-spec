@@ -127,6 +127,29 @@ def add_task_worktree(project_dir: Path, task_id: str, slug: str, feature_branch
     return path
 
 
+COMMITTER_NAME = "devteam"
+COMMITTER_EMAIL = "devteam@localhost"
+
+
+def committer_env(project_dir: Path) -> dict[str, str]:
+    """A committer identity for the merge when the repository has none configured.
+
+    The integrate script rebases task branches, and git refuses to rebase
+    without a committer. Authorship stays with the implementer's commit; only
+    the committer of the rebased copy is filled in, and only when the checkout
+    (or the user's global config) does not already name one.
+    """
+    configured = _git(project_dir, "config", "user.email")
+    if configured.returncode == 0 and configured.stdout.strip():
+        return {}
+    return {
+        "GIT_COMMITTER_NAME": COMMITTER_NAME,
+        "GIT_COMMITTER_EMAIL": COMMITTER_EMAIL,
+        "GIT_AUTHOR_NAME": COMMITTER_NAME,
+        "GIT_AUTHOR_EMAIL": COMMITTER_EMAIL,
+    }
+
+
 def integrate_task(
     loop_spec_root: Path,
     project_dir: Path,
@@ -150,6 +173,7 @@ def integrate_task(
         task.verify_command,
         "--cleanup",
         cwd=project_dir,
+        env=committer_env(project_dir),
     )
     try:
         record = json.loads(result.stdout or "{}")

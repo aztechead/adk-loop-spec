@@ -211,6 +211,19 @@ async def test_waves_run_in_order_and_land_on_the_feature_branch(
     assert CycleResult.model_validate(state[RESULT_KEY]).succeeded
 
 
+async def test_integration_works_without_a_configured_git_identity(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CI runners have no git identity; the rebase inside integrate-task.sh still needs one."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+    _, _, state = await run_loop(repo, parallel_config(), FakeImplementer(), monkeypatch)
+    summary = WaveSummary.model_validate(state[WAVE_SUMMARY_KEY])
+    assert (summary.merged, summary.blocked) == (["t1", "t2", "t3"], [])
+    # The implementer stays the author; only the rebased copy's committer is filled in.
+    assert git(repo, "log", "-1", "--format=%an <%ae>", FEATURE_BRANCH) == "test <test@example.com>"
+
+
 async def test_an_uncommitted_task_is_blocked_not_merged(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
