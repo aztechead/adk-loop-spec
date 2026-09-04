@@ -214,7 +214,7 @@ async def test_waves_run_in_order_and_land_on_the_feature_branch(
 async def test_an_uncommitted_task_is_blocked_not_merged(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    implementers = FakeImplementer(skip_commit={"t2"})
+    implementers = FakeImplementer(skip_commit=frozenset({"t2"}))
     _, _, state = await run_loop(repo, parallel_config(), implementers, monkeypatch)
     summary = WaveSummary.model_validate(state[WAVE_SUMMARY_KEY])
     assert summary.merged == ["t1", "t3"]
