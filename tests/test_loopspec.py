@@ -42,6 +42,7 @@ def test_environment_follows_the_loop_spec_contract(tmp_path: Path) -> None:
         "LOOP_SPEC_MODEL_CODE_REVIEWER": claude_on_vertex,
         "LOOP_SPEC_ANSWER_STYLE": "compact",
         "GOOGLE_GENAI_USE_VERTEXAI": "true",
+        "GOOGLE_GENAI_USE_ENTERPRISE": "true",
         "GOOGLE_CLOUD_PROJECT": "offline-project",
         "GOOGLE_CLOUD_LOCATION": "us-central1",
     }

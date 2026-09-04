@@ -125,8 +125,9 @@ provider entries and are exported as loop-spec's documented
 `LOOP_SPEC_PHASE_MODEL_<PHASE>` / `LOOP_SPEC_MODEL_<ROLE>` variables as ADK
 registry ids (a bare Gemini id, or `Claude:projects/.../models/<id>` for
 Claude on Vertex). Any Agent Platform route also exports
-`GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`,
-because loop-spec builds its role agents from bare model strings:
+`GOOGLE_GENAI_USE_VERTEXAI` (and its successor `GOOGLE_GENAI_USE_ENTERPRISE`),
+`GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`, because loop-spec builds
+its role agents from bare model strings:
 
 ```yaml
 loop_spec:
@@ -139,7 +140,9 @@ loop_spec:
 against `services.agent_platform.agent_engine_id` in the `gcp` project. The
 `memory_commit` plugin sends each turn's new events to whichever memory store
 is active (so Memory Bank extracts from fresh material, never the whole session
-again), and the qa agent reads it back with `preload_memory` / `load_memory`.
+again) and keeps its watermark in session state, so a run resumed in another
+process continues from the same mark. The qa agent reads memory back with
+`preload_memory` / `load_memory`.
 
 **Structured outputs.** Intake returns `IntakeResult {category, request, team}`
 and writes it to session state under `intake_verdict`; the router reads the
@@ -254,6 +257,8 @@ observe ──(after PLAN)──▶ plan_waves ──▶ execute_wave ──▶ 
   in its round report; when loop-spec resumes, its EXECUTE phase seeds the
   merged set from the done marks and dispatches nothing already published.
 
+A blocked task's worktree is removed (its branch stays) so loop-spec's own retry
+never collides with it, and a human stop prunes every unmerged worktree.
 Implementers run on `parallel.implementer`, else `loop_spec.roles.implementer`,
 else `loop_spec.agent`. The test suite runs the whole detour against a real
 git repository: three tasks in two waves, the integrate script, the done

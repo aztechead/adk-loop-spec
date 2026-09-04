@@ -5,13 +5,16 @@ from pathlib import Path
 
 import pytest
 from google.adk.agents import LlmAgent
+from google.adk.apps import App
+from google.adk.memory import InMemoryMemoryService
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.workflow import DEFAULT_ROUTE
+from google.adk.workflow import DEFAULT_ROUTE, FunctionNode
 
 from devteam.agents import QA_STATE_KEY, Category, IntakeResult, QaAnswer
-from devteam.app import build_app
+from devteam.app import MEMORY_WATERMARK_KEY, MemoryCommitPlugin, build_app
 from devteam.config import AppConfig
+from devteam.cycle import CycleResult
 from devteam.graph import (
     CHANGE_ROUTE,
     QUESTION_ROUTE,
@@ -20,8 +23,10 @@ from devteam.graph import (
     decide,
     peer_route,
 )
+from devteam.manager import AUTO_PROMPT, RESULT_KEY, Decision, PhaseVerdict, build_manager_loop
 from devteam.runtime import policy_oracle, run_turn, text_message
-from tests.conftest import ScriptedLlm
+from tests.conftest import ScriptedLlm, base_raw
+from tests.test_manager import FakeLoopSpec
 
 PEERS = frozenset({"platform_team"})
 
@@ -132,3 +137,79 @@ async def test_question_reaches_qa_with_the_users_words(
     )
     assert stored is not None
     assert QaAnswer.model_validate(stored.state[QA_STATE_KEY]) == answer
+
+
+async def test_a_feature_reaches_the_manager_loop_with_the_users_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CHANGE route: intake labels a feature, the manager loop drives loop-spec with it."""
+    config = AppConfig.model_validate(base_raw())
+    request = "add a healthcheck endpoint"
+    llm = ScriptedLlm(
+        model="scripted",
+        script={
+            "Classify": json.dumps({"category": "FEATURE", "request": request}),
+            "You manage": PhaseVerdict(
+                decision=Decision.CONTINUE, guidance="Go."
+            ).model_dump_json(),
+        },
+    )
+    monkeypatch.setattr("devteam.agents.model_for_agent", lambda role, cfg: llm.as_agent_model())
+    monkeypatch.setattr("devteam.manager.model_for_agent", lambda role, cfg: llm.as_agent_model())
+    fake = FakeLoopSpec(tmp_path)
+    loop = build_manager_loop(config, tmp_path, FunctionNode(func=fake.loop_spec, name="loop_spec"))
+    runner = Runner(
+        node=build_graph(config, loop), app_name="test", session_service=InMemorySessionService()
+    )
+    session = await runner.session_service.create_session(app_name="test", user_id="u")
+    async for _ in run_turn(
+        runner,
+        user_id="u",
+        session_id=session.id,
+        message=text_message(request),
+        oracle=policy_oracle(config.loop_spec.supervisor.oracle),
+    ):
+        pass
+
+    assert fake.prompts[0].startswith(AUTO_PROMPT.format(task=request))
+    assert len(fake.prompts) == 3
+    stored = await runner.session_service.get_session(
+        app_name="test", user_id="u", session_id=session.id
+    )
+    assert stored is not None
+    assert CycleResult.model_validate(stored.state[RESULT_KEY]).succeeded
+
+
+async def test_memory_commits_only_new_events_across_turns(config: AppConfig) -> None:
+    """The watermark lives in session state, so a second turn commits only its own events."""
+    llm = ScriptedLlm(model="scripted", script={"Reply": "noted"})
+    agent = LlmAgent(name="echo", model=llm, instruction="Reply briefly.")
+    memory = InMemoryMemoryService()
+    runner = Runner(
+        app=App(name="test", root_agent=agent, plugins=[MemoryCommitPlugin()]),
+        session_service=InMemorySessionService(),
+        memory_service=memory,
+    )
+    session = await runner.session_service.create_session(app_name="test", user_id="u")
+
+    async def turn(text: str) -> int:
+        async for _ in runner.run_async(
+            user_id="u", session_id=session.id, new_message=text_message(text)
+        ):
+            pass
+        stored = await runner.session_service.get_session(
+            app_name="test", user_id="u", session_id=session.id
+        )
+        assert stored is not None
+        return int(stored.state[MEMORY_WATERMARK_KEY])
+
+    first = await turn("one")
+    second = await turn("two")
+    assert 0 < first < second
+    committed = memory._session_events[("test", "u")][session.id]
+    assert [p.text for e in committed for p in ((e.content.parts or []) if e.content else [])] == [
+        "one",
+        "noted",
+        "two",
+        "noted",
+    ]

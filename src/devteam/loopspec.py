@@ -9,7 +9,8 @@ contract (``docs/loop-spec/configuration.md`` in its tree):
     loop_spec.roles.<role>        -> LOOP_SPEC_MODEL_<ROLE>
     loop_spec.mount               -> LOOP_SPEC_ADK_AGENT_DIR (the fleet rung's `adk run` target)
     supervisor.oracle.pins.<key>  -> LOOP_SPEC_ANSWER_<KEY>
-    gcp                           -> GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_CLOUD_PROJECT/LOCATION
+    gcp                           -> GOOGLE_GENAI_USE_VERTEXAI (+ its successor
+                                     GOOGLE_GENAI_USE_ENTERPRISE), GOOGLE_CLOUD_PROJECT/LOCATION
 
 Model routes are the registry ids :func:`devteam.models.model_id` produces.
 Any agent-platform route also needs the Vertex variables, because loop-spec
@@ -33,7 +34,8 @@ if TYPE_CHECKING:
 
 _EXTENSION_SUBDIR = Path("extensions/adk")
 AGENT_DIR_VAR = "LOOP_SPEC_ADK_AGENT_DIR"
-USE_VERTEX_VAR = "GOOGLE_GENAI_USE_VERTEXAI"
+USE_VERTEX_VAR = "GOOGLE_GENAI_USE_VERTEXAI"  # the name ADK 2.8 still reads, now deprecated
+USE_ENTERPRISE_VAR = "GOOGLE_GENAI_USE_ENTERPRISE"  # its replacement; both are exported
 LOCATION_VAR = "GOOGLE_CLOUD_LOCATION"
 
 
@@ -84,6 +86,7 @@ def environment(config: AppConfig, project_dir: Path) -> dict[str, str]:
         env[f"LOOP_SPEC_ANSWER_{key.upper()}"] = answer
     if any(spec.backend is Backend.AGENT_PLATFORM for spec in routed_specs(config)):
         env[USE_VERTEX_VAR] = "true"
+        env[USE_ENTERPRISE_VAR] = "true"
         env[LOCATION_VAR] = config.gcp.location
         if project := project_for(config):
             env[PROJECT_VAR] = project

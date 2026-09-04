@@ -13,11 +13,13 @@ from google.adk.workflow import BaseNode, FunctionNode
 from devteam.config import AppConfig
 from devteam.cycle import CycleResult, read_checklist
 from devteam.fanout import (
+    WAVE_PLAN_KEY,
     WAVE_SUMMARY_KEY,
     TaskReport,
     WaveSummary,
     add_task_worktree,
     build_implementer,
+    prune_outstanding_worktrees,
     report_key,
     task_branch,
     worktree_path,
@@ -25,7 +27,7 @@ from devteam.fanout import (
 from devteam.manager import RESULT_KEY, Decision, PhaseVerdict, build_manager_loop
 from devteam.models import AgentModel
 from devteam.runtime import policy_oracle, run_turn, text_message
-from devteam.waves import PlanTask
+from devteam.waves import PlanTask, WavePlan
 from tests.conftest import ScriptedLlm, base_raw
 
 SLUG = "demo"
@@ -234,6 +236,9 @@ async def test_an_uncommitted_task_is_blocked_not_merged(
     assert [(b.task_id, b.reason) for b in summary.blocked] == [("t2", "gave up")]
     assert read_checklist(repo, SLUG).ticked == 2
     assert not (repo / "b.txt").exists()
+    # The blocked task's checkout is gone so loop-spec can retry it; its branch survives.
+    assert not worktree_path(repo, "t2", SLUG).exists()
+    assert "task/t2-demo" in git(repo, "branch", "--list", "task/t2-demo")
 
 
 def test_worktrees_branch_off_the_feature_head_and_are_reused(repo: Path) -> None:
@@ -265,3 +270,14 @@ def test_model_backed_implementer_is_isolated_and_typed(tmp_path: Path, config: 
         and "test -f a.txt" in instruction
         and "a.txt says hi" in instruction
     )
+
+
+def test_pruning_drops_only_unmerged_worktrees(repo: Path) -> None:
+    for task_id in ("t1", "t2", "t3"):
+        add_task_worktree(repo, task_id, SLUG, FEATURE_BRANCH)
+    plan = WavePlan(slug=SLUG, branch=FEATURE_BRANCH, waves=[["t1", "t2"], ["t3"]], next_wave=1)
+    assert prune_outstanding_worktrees(repo, plan) == ["t3"]
+    assert worktree_path(repo, "t1", SLUG).exists() and worktree_path(repo, "t2", SLUG).exists()
+    assert not worktree_path(repo, "t3", SLUG).exists()
+    assert "task/t3-demo" in git(repo, "branch", "--list", "task/t3-demo")
+    assert WAVE_PLAN_KEY  # the manager prunes from this key when a human stops the loop

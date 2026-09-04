@@ -150,6 +150,30 @@ def committer_env(project_dir: Path) -> dict[str, str]:
     }
 
 
+def remove_worktree(project_dir: Path, task_id: str, slug: str) -> None:
+    """Drop a task's worktree directory; its branch stays so the work can be retried."""
+    path = worktree_path(project_dir, task_id, slug)
+    if path.is_dir():
+        removed = _git(project_dir, "worktree", "remove", "--force", str(path))
+        if removed.returncode != 0:
+            raise RuntimeError(
+                f"git worktree remove failed for {task_id}: {removed.stderr.strip()}"
+            )
+    _git(project_dir, "worktree", "prune")
+
+
+def prune_outstanding_worktrees(project_dir: Path, plan: WavePlan) -> list[str]:
+    """Remove the worktrees of every task the plan has not merged; returns their ids.
+
+    loop-spec creates its own worktree per task when its EXECUTE phase retries a
+    task, so one left behind here would collide with it.
+    """
+    outstanding = [task_id for wave in plan.waves[plan.next_wave :] for task_id in wave]
+    for task_id in outstanding:
+        remove_worktree(project_dir, task_id, plan.slug)
+    return outstanding
+
+
 def integrate_task(
     loop_spec_root: Path,
     project_dir: Path,
@@ -329,6 +353,11 @@ def build_wave_nodes(
             return judge(ctx, report, summary)
         plan = WavePlan(slug=slug, branch=branch, waves=waves)
         summary.waves_total = len(waves)
+        for task_id in (task_id for wave in waves for task_id in wave):
+            # A report left by an earlier plan must never pass for this one. Cleared
+            # here, not in execute_wave: a node's state delta lands after its child
+            # runs, so clearing there would erase the fresh reports.
+            ctx.state[report_key(task_id)] = None
         ctx.state[WAVE_PLAN_KEY] = plan.model_dump(mode="json")
         ctx.state[WAVE_SUMMARY_KEY] = summary.model_dump(mode="json")
         if plan.finished:
@@ -368,6 +397,7 @@ def build_wave_nodes(
                     report.notes if report and report.notes else "the implementer committed nothing"
                 )
                 summary.blocked.append(TaskOutcome(task_id=task_id, status="blocked", reason=why))
+                remove_worktree(project_dir, task_id, plan.slug)
                 continue
             outcome = integrate_task(
                 loop_spec_root, project_dir, plan.branch, tasks[task_id], plan.slug

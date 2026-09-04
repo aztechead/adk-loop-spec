@@ -10,6 +10,7 @@ from google.adk import Workflow
 from google.adk.agents.base_agent import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.apps import App, ResumabilityConfig
+from google.adk.events import Event, EventActions
 from google.adk.plugins import BasePlugin, ReflectAndRetryToolPlugin
 from google.adk.runners import Runner
 
@@ -19,25 +20,28 @@ from devteam.loopspec import build_working_agent
 from devteam.manager import build_manager_loop
 from devteam.services import build_services
 
+MEMORY_WATERMARK_KEY = "memory_committed_events"
+
 
 class MemoryCommitPlugin(BasePlugin):
     """Feed each finished turn's new events into long-term memory.
 
     Only events since the last commit are sent, so Memory Bank extracts from
-    fresh material instead of re-processing the whole session every turn.
+    fresh material instead of re-processing the whole session every turn. The
+    watermark lives in session state, written through the session service as
+    a state-delta event, so a run resumed in another process continues from
+    the same mark instead of re-committing the whole session.
     """
 
     def __init__(self) -> None:
         super().__init__(name="memory_commit")
-        # ponytail: per-process watermark; move into session state if runs span processes
-        self._committed: dict[str, int] = {}
 
     async def after_run_callback(self, *, invocation_context: InvocationContext) -> None:
         memory = invocation_context.memory_service
         session = invocation_context.session
         if memory is None:
             return
-        start = self._committed.get(session.id, 0)
+        start = int(session.state.get(MEMORY_WATERMARK_KEY) or 0)
         fresh = [e for e in session.events[start:] if e.content and e.content.parts]
         if fresh:
             await memory.add_events_to_memory(
@@ -46,7 +50,14 @@ class MemoryCommitPlugin(BasePlugin):
                 session_id=session.id,
                 events=fresh,
             )
-        self._committed[session.id] = len(session.events)
+        await invocation_context.session_service.append_event(
+            session,
+            Event(
+                invocation_id=invocation_context.invocation_id,
+                author=self.name,
+                actions=EventActions(state_delta={MEMORY_WATERMARK_KEY: len(session.events)}),
+            ),
+        )
 
 
 def _app(

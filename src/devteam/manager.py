@@ -48,8 +48,16 @@ from pydantic import BaseModel, Field
 
 from devteam.config import AgentRole, AppConfig
 from devteam.cycle import Checklist, CycleResult, read_checklist, read_last_result
-from devteam.fanout import RUN_ROUTE, ImplementerFactory, WaveSummary, build_wave_nodes
+from devteam.fanout import (
+    RUN_ROUTE,
+    WAVE_PLAN_KEY,
+    ImplementerFactory,
+    WaveSummary,
+    build_wave_nodes,
+    prune_outstanding_worktrees,
+)
 from devteam.models import model_for_agent
+from devteam.waves import WavePlan
 
 AUTO_PROMPT = "Load the loop-spec auto skill and run: {task}"
 RESUME_PROMPT = "Load the loop-spec cycle skill and run: autonomous"
@@ -309,6 +317,9 @@ def build_manager_loop(
                 actions=EventActions(route=[CONTINUE_ROUTE]),
                 output=next_prompt(config, verdict, stalled=False),
             )
+        if plan := ctx.state.get(WAVE_PLAN_KEY):
+            # Nothing will resume these; leave the branches, drop the checkouts.
+            prune_outstanding_worktrees(project_dir, WavePlan.model_validate(plan))
         return Event(
             actions=EventActions(route=[DONE_ROUTE]),
             output=halted_result("a human stopped the manager loop").model_dump(
