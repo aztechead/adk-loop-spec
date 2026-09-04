@@ -3,15 +3,22 @@
 import pytest
 from pydantic import ValidationError
 
-from devteam.config import AgentRole, AppConfig, ServiceBackend
+from devteam.config import AgentRole, AppConfig, Backend, Effort, ServiceBackend, ThinkingLevel
 from tests.conftest import base_raw
 
 
 def test_shipped_config_loads(config: AppConfig) -> None:
     assert config.app.name == "devteam"
     assert config.services.backend is ServiceBackend.IN_MEMORY
-    assert config.models.spec_for_agent(AgentRole.INTAKE).model
-    assert config.models.spec_for_agent(AgentRole.QA).extra == {"thinking": {"type": "adaptive"}}
+    assert config.gcp.location == "us-central1"
+    for role in AgentRole:
+        assert config.models.spec_for_agent(role).backend is Backend.AGENT_PLATFORM
+    qa = config.models.spec_for_agent(AgentRole.QA)
+    assert qa.generation.effort is Effort.HIGH and qa.location == "us-east5"
+    assert config.models.spec_for_agent(AgentRole.MANAGER).generation.thinking_level is (
+        ThinkingLevel.HIGH
+    )
+    assert config.loop_spec.manager.stall_rounds == 3
 
 
 def test_every_agent_role_needs_a_provider() -> None:
@@ -44,6 +51,27 @@ def test_unknown_loop_spec_provider_is_refused() -> None:
 def test_agent_platform_backend_requires_engine_id() -> None:
     raw = base_raw() | {"services": {"backend": "agent-platform"}}
     with pytest.raises(ValidationError, match="agent_engine_id"):
+        AppConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("spec", "message"),
+    [
+        (
+            {"provider": "gemini", "model": "m", "generation": {"effort": "high"}},
+            "effort is Claude-only",
+        ),
+        (
+            {"provider": "anthropic", "model": "m", "generation": {"thinking_level": "low"}},
+            "thinking_level is Gemini-only",
+        ),
+        ({"provider": "gemini", "model": "m", "extra": {"api_base": "x"}}, "backend: api-key"),
+    ],
+)
+def test_settings_must_match_provider_and_backend(spec: dict[str, object], message: str) -> None:
+    raw = base_raw()
+    raw["models"]["providers"]["gemini-pro"] = spec  # type: ignore[index]
+    with pytest.raises(ValidationError, match=message):
         AppConfig.model_validate(raw)
 
 

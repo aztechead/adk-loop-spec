@@ -9,18 +9,27 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.workflow import DEFAULT_ROUTE
 
-from devteam import build_app
-from devteam.agents import Category, IntakeResult
+from devteam.agents import QA_STATE_KEY, Category, IntakeResult, QaAnswer
+from devteam.app import build_app
 from devteam.config import AppConfig
-from devteam.graph import CHANGE_ROUTE, QUESTION_ROUTE, build_graph, make_router, peer_route
+from devteam.graph import (
+    CHANGE_ROUTE,
+    QUESTION_ROUTE,
+    Clarification,
+    build_graph,
+    decide,
+    peer_route,
+)
 from devteam.runtime import policy_oracle, run_turn, text_message
 from tests.conftest import ScriptedLlm
 
+PEERS = frozenset({"platform_team"})
+
 
 def routed(
-    node_input: IntakeResult | dict[str, object] | str,
+    node_input: IntakeResult | dict[str, object] | str, stored: object = None
 ) -> tuple[list[bool | int | str], object]:
-    event = make_router(frozenset({"platform_team"}))(node_input)
+    event = decide(node_input, stored, PEERS)
     route = event.actions.route
     assert isinstance(route, list)
     return route, event.output
@@ -53,8 +62,19 @@ def test_unparseable_verdict_takes_the_default_route() -> None:
     assert routed("BANANA") == ([DEFAULT_ROUTE], "BANANA")
 
 
+def test_the_stored_verdict_rescues_an_unusable_input() -> None:
+    """Intake's output_key put the verdict in state; the router reads it back."""
+    stored = {"category": "QUESTION", "request": "what is the SLA?", "team": None}
+    assert routed("garbled", stored) == ([QUESTION_ROUTE], "what is the SLA?")
+
+
+def test_a_human_clarification_is_a_verdict() -> None:
+    reply = Clarification(category=Category.FEATURE, request="add dark mode")
+    assert routed(reply.model_dump()) == ([CHANGE_ROUTE], "add dark mode")
+
+
 def test_app_assembles_offline(config: AppConfig, tmp_path: Path) -> None:
-    """The whole App — graph, loop-spec mount, plugins — builds with no network."""
+    """The whole App — graph, manager loop, loop-spec mount, plugins — builds with no network."""
     app = build_app(config, project_dir=tmp_path)
     assert app.root_agent is not None and app.root_agent.name == "devteam_workflow"
     assert [plugin.name for plugin in app.plugins] == [
@@ -68,23 +88,25 @@ def test_app_assembles_offline(config: AppConfig, tmp_path: Path) -> None:
 async def test_question_reaches_qa_with_the_users_words(
     config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """End to end through the real Workflow, with a scripted model in place of LiteLLM.
+    """End to end through the real Workflow, with a scripted model in place of the real one.
 
-    Guards the routing contract: the qa agent's last user turn must be the
-    request itself, never the classifier's label.
+    Guards two contracts: the qa agent's last user turn must be the request
+    itself, never the classifier's label; and its reply is a typed QaAnswer
+    that also lands in session state.
     """
     request = "How do we deploy this service?"
+    answer = QaAnswer(answer="Through the release pipeline.", sources=["memory: deploy notes"])
     llm = ScriptedLlm(
         model="scripted",
         script={
             "Classify": json.dumps({"category": "QUESTION", "request": request}),
-            "Answer the user": "Through the release pipeline.",
+            "Answer the user": answer.model_dump_json(),
         },
     )
-    monkeypatch.setattr("devteam.agents.model_for_agent", lambda role, cfg: llm)
-    stub_loop_spec = LlmAgent(name="loop_spec", model=llm, instruction="never reached")
+    monkeypatch.setattr("devteam.agents.model_for_agent", lambda role, cfg: llm.as_agent_model())
+    stub_change = LlmAgent(name="loop_spec", model=llm, instruction="never reached")
     runner = Runner(
-        node=build_graph(config, stub_loop_spec),
+        node=build_graph(config, stub_change),
         app_name="test",
         session_service=InMemorySessionService(),
     )
@@ -101,7 +123,12 @@ async def test_question_reaches_qa_with_the_users_words(
         if event.author == "qa" and event.content:
             texts += [p.text for p in event.content.parts or [] if p.text]
 
-    assert texts == ["Through the release pipeline."]
+    assert [QaAnswer.model_validate_json(t) for t in texts] == [answer]
     qa_request = llm.requests[-1]
     last_user = next(c for c in reversed(qa_request.contents) if c.role == "user")
     assert [p.text for p in last_user.parts or []] == [request]
+    stored = await runner.session_service.get_session(
+        app_name="test", user_id="u", session_id=session.id
+    )
+    assert stored is not None
+    assert QaAnswer.model_validate(stored.state[QA_STATE_KEY]) == answer

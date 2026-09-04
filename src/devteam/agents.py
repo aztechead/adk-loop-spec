@@ -2,7 +2,9 @@
 
 Each builder takes the validated config and returns a ready agent; model
 choice always flows through :mod:`devteam.models` so YAML stays the single
-switch for vendors and backends.
+switch for vendors and backends. Every agent that speaks to the graph does so
+through a typed output schema, and every verdict also lands in session state
+under its ``output_key`` so later nodes and tools can read it back.
 """
 
 import enum
@@ -23,8 +25,11 @@ from google.adk.tools import load_memory, preload_memory
 from google.adk.tools.agent_tool import AgentTool
 from pydantic import BaseModel, Field
 
-from .config import AgentRole, AppConfig, PeerConfig
-from .models import model_for_agent
+from devteam.config import AgentRole, AppConfig, PeerConfig
+from devteam.models import model_for_agent
+
+INTAKE_STATE_KEY = "intake_verdict"
+QA_STATE_KEY = "qa_answer"
 
 
 class Category(enum.StrEnum):
@@ -51,6 +56,19 @@ class IntakeResult(BaseModel):
     )
 
 
+class QaAnswer(BaseModel):
+    """The Q&A agent's structured reply, so peers and the CLI never parse prose."""
+
+    answer: str = Field(description="The answer, in plain words.")
+    sources: list[str] = Field(
+        default_factory=list,
+        description="Where the answer came from: memory entries, files, or peer teams.",
+    )
+    teams_consulted: list[str] = Field(
+        default_factory=list, description="Peer teams asked while answering, if any."
+    )
+
+
 def build_intake_agent(config: AppConfig) -> LlmAgent:
     """Classify the incoming request and name the team that owns it.
 
@@ -66,9 +84,11 @@ def build_intake_agent(config: AppConfig) -> LlmAgent:
         if peers
         else "There are no peer teams; team is always null."
     )
+    model = model_for_agent(AgentRole.INTAKE, config)
     return LlmAgent(
         name="intake",
-        model=model_for_agent(AgentRole.INTAKE, config),
+        model=model.llm,
+        generate_content_config=model.generation,
         description="Classifies a dev-team request as a feature, a bug, or a question.",
         instruction=(
             f"Classify the user's request as exactly one of: {labels}.\n"
@@ -78,6 +98,7 @@ def build_intake_agent(config: AppConfig) -> LlmAgent:
             "Return the label and the user's request text verbatim.\n" + team_note
         ),
         output_schema=IntakeResult,
+        output_key=INTAKE_STATE_KEY,
     )
 
 
@@ -119,24 +140,31 @@ def build_qa_agent(config: AppConfig) -> LlmAgent:
 
     Memory Bank supplies recall (preload for ambient context, load_memory for
     explicit search); each A2A peer is wrapped as a tool so one question can be
-    handed to another deployed instance and its answer folded into ours.
-    This is also the only agent exposed to peers over A2A: it holds no shell.
+    handed to another deployed instance and its answer folded into ours. The
+    reply is a :class:`QaAnswer`: ADK keeps the tools available during the
+    agent's thought loop and enforces the schema on the final answer only.
     """
     peers = [build_peer_agent(peer) for peer in config.a2a.peers]
     peer_note = (
         "When the question concerns another team's system, ask that team's "
-        f"agent tool ({', '.join(peer.name for peer in peers)}) and credit its answer."
+        f"agent tool ({', '.join(peer.name for peer in peers)}), credit its answer, "
+        "and list it under teams_consulted."
         if peers
         else "No peer teams are configured; answer from memory and this conversation."
     )
+    model = model_for_agent(AgentRole.QA, config)
     return LlmAgent(
         name="qa",
-        model=model_for_agent(AgentRole.QA, config),
+        model=model.llm,
+        generate_content_config=model.generation,
         description="Answers dev-team questions from project memory and peer teams.",
         instruction=(
             "Answer the user's question about this project and team.\n"
             "Search long-term memory (load_memory) for relevant past decisions "
-            "before answering; say so plainly when memory holds nothing relevant.\n" + peer_note
+            "before answering; say so plainly when memory holds nothing relevant.\n"
+            "List every memory entry, file, or team you relied on under sources.\n" + peer_note
         ),
         tools=[preload_memory, load_memory, *(AgentTool(agent=peer) for peer in peers)],
+        output_schema=QaAnswer,
+        output_key=QA_STATE_KEY,
     )

@@ -5,6 +5,8 @@ description = "Exemplar Google ADK dev-team assistant: LiteLLM (Gemini + Claude,
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "anthropic>=0.78",
+    "fastapi>=0.115",
     "google-adk[a2a]>=2.7,<3",
     "litellm>=1.84",
     "pyyaml>=6",
@@ -39,6 +41,13 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+
+[tool.ruff.lint]
+extend-select = ["I", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+# Absolute imports only: every module names its package in full.
+ban-relative-imports = "all"
 
 [tool.pyright]
 pythonVersion = "3.14"

@@ -13,10 +13,11 @@ from google.adk.apps import App, ResumabilityConfig
 from google.adk.plugins import BasePlugin, ReflectAndRetryToolPlugin
 from google.adk.runners import Runner
 
-from .config import AppConfig
-from .graph import build_graph
-from .loopspec import build_working_agent
-from .services import build_services
+from devteam.config import AppConfig
+from devteam.graph import build_graph
+from devteam.loopspec import build_working_agent
+from devteam.manager import build_manager_loop
+from devteam.services import build_services
 
 
 class MemoryCommitPlugin(BasePlugin):
@@ -64,21 +65,30 @@ def _app(
     )
 
 
+def _manager_loop(config: AppConfig, project_dir: Path) -> tuple[Workflow, BasePlugin]:
+    """The manager loop over the mounted loop-spec agent, plus that agent's plugin.
+
+    The loop-spec agent and its plugin share one bridge, so both must land on
+    the same App together.
+    """
+    agent, plugin = build_working_agent(config, project_dir)
+    return build_manager_loop(config, project_dir, agent), plugin
+
+
 def build_app(config: AppConfig, project_dir: Path | None = None) -> App:
-    """The dev-team App: the request graph plus the loop-spec mount.
+    """The dev-team App: the request graph, with the manager loop shipping changes.
 
     ``project_dir`` is the repository loop-spec works on (defaults to the
-    current directory). The loop-spec agent and its plugin share one bridge,
-    so both land on this App together.
+    current directory).
     """
-    agent, plugin = build_working_agent(config, project_dir or Path.cwd())
-    return _app(config, config.app.name, build_graph(config, agent), [plugin])
+    loop, plugin = _manager_loop(config, project_dir or Path.cwd())
+    return _app(config, config.app.name, build_graph(config, loop), [plugin])
 
 
 def build_loop_spec_app(config: AppConfig, project_dir: Path) -> App:
-    """loop-spec's working agent as its own App, for supervised runs."""
-    agent, plugin = build_working_agent(config, project_dir)
-    return _app(config, "loop_spec", agent, [plugin])
+    """The manager loop as its own App, for supervised runs."""
+    loop, plugin = _manager_loop(config, project_dir)
+    return _app(config, "loop_spec", loop, [plugin])
 
 
 def build_runner(config: AppConfig, project_dir: Path | None = None) -> Runner:

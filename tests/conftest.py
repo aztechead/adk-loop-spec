@@ -11,13 +11,19 @@ from google.genai import types
 from pydantic import Field
 
 from devteam.config import AppConfig, load_config
+from devteam.models import AgentModel
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(autouse=True)
 def dummy_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Model construction checks these; no test may reach a real endpoint."""
+    """Model construction checks these; no test may reach a real endpoint.
+
+    Agent Platform clients are built lazily, so a project name is all the
+    default backend needs at build time; ADC is only consulted on a request.
+    """
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "offline-project")
     monkeypatch.setenv("GOOGLE_API_KEY", "offline-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "offline-test")
 
@@ -32,14 +38,8 @@ def base_raw() -> dict[str, object]:
     """The smallest valid config mapping, for tests that vary one section."""
     return {
         "models": {
-            "providers": {
-                "gemini-pro": {
-                    "provider": "gemini",
-                    "backend": "api-key",
-                    "model": "gemini-2.5-pro",
-                }
-            },
-            "agents": {"intake": "gemini-pro", "qa": "gemini-pro"},
+            "providers": {"gemini-pro": {"provider": "gemini", "model": "gemini-2.5-pro"}},
+            "agents": {"intake": "gemini-pro", "qa": "gemini-pro", "manager": "gemini-pro"},
         }
     }
 
@@ -69,3 +69,7 @@ class ScriptedLlm(BaseLlm):
             content=types.Content(role="model", parts=[types.Part(text=text)]),
             turn_complete=True,
         )
+
+    def as_agent_model(self) -> AgentModel:
+        """What ``model_for_agent`` returns, with this script in the model's seat."""
+        return AgentModel(self, None)

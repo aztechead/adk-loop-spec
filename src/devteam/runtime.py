@@ -12,7 +12,7 @@ from google.adk.events import Event
 from google.adk.runners import Runner
 from google.genai import types
 
-from .config import OraclePolicy
+from devteam.config import OraclePolicy
 
 type Oracle = Callable[[list[str]], str]
 """Chooses one of the options a question offers (or ``halt``)."""

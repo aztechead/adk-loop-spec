@@ -8,8 +8,9 @@ from google.adk.events import Event
 from google.genai import types
 
 from devteam.config import AppConfig, OraclePolicy
+from devteam.cycle import CycleResult, read_last_result
 from devteam.runtime import HALT, answer_for, policy_oracle
-from devteam.supervisor import CycleResult, ensure_profile, profile_env, read_last_result
+from devteam.supervisor import ensure_profile, profile_env
 from tests.conftest import base_raw
 
 
@@ -32,6 +33,28 @@ def test_success_requires_outcome_and_convergence() -> None:
     assert good.succeeded
     assert not stalled.succeeded
     assert not failed.succeeded
+
+
+def test_result_record_is_read_as_loop_spec_writes_it(config: AppConfig, tmp_path: Path) -> None:
+    """The contract's camelCase record, including fields we do not use, parses into the model."""
+    record = {
+        "schema": 1,
+        "status": "paused",
+        "outcome": "in-progress",
+        "reason": "phase-handoff",
+        "summary": "PLAN closed",
+        "slug": "healthcheck",
+        "phaseReached": "plan",
+        "converged": False,
+        "workDelivered": False,
+        "prUrl": None,
+        "iterations": {"used": 0, "max": None},
+    }
+    (tmp_path / ".loop-spec").mkdir()
+    (tmp_path / ".loop-spec" / "last-result.json").write_text(json.dumps(record))
+    result = read_last_result(config.loop_spec.root, tmp_path)
+    assert result.is_handoff and not result.succeeded
+    assert (result.slug, result.phase_reached, result.handoffs) == ("healthcheck", "plan", 0)
 
 
 def test_profile_names_the_store_and_sink_adapters(tmp_path: Path) -> None:
@@ -67,7 +90,7 @@ def test_profile_is_written_validated_and_never_clobbered(
 
 def test_missing_result_is_reconciled_or_fails_loudly(config: AppConfig, tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="cycle-reconcile"):
-        read_last_result(config, tmp_path)
+        read_last_result(config.loop_spec.root, tmp_path)
 
 
 def pending_choice_event(options: list[str]) -> Event:

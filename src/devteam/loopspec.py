@@ -9,8 +9,12 @@ contract (``docs/loop-spec/configuration.md`` in its tree):
     loop_spec.roles.<role>        -> LOOP_SPEC_MODEL_<ROLE>
     loop_spec.mount               -> LOOP_SPEC_ADK_AGENT_DIR (the fleet rung's `adk run` target)
     supervisor.oracle.pins.<key>  -> LOOP_SPEC_ANSWER_<KEY>
+    gcp                           -> GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_CLOUD_PROJECT/LOCATION
 
-Model routes take LiteLLM ``provider/model`` ids, which ADK dispatch consumes natively.
+Model routes are the registry ids :func:`devteam.models.model_id` produces.
+Any agent-platform route also needs the Vertex variables, because loop-spec
+builds its role agents from bare model strings and ADK's Gemini and Claude
+classes read the project and region from the environment.
 """
 
 import importlib
@@ -20,8 +24,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING
 
-from .config import AppConfig
-from .models import litellm_id
+from devteam.config import AppConfig, Backend, ModelSpec
+from devteam.models import PROJECT_VAR, model_id, project_for, require_credentials
 
 if TYPE_CHECKING:
     from google.adk.agents import LlmAgent
@@ -29,6 +33,8 @@ if TYPE_CHECKING:
 
 _EXTENSION_SUBDIR = Path("extensions/adk")
 AGENT_DIR_VAR = "LOOP_SPEC_ADK_AGENT_DIR"
+USE_VERTEX_VAR = "GOOGLE_GENAI_USE_VERTEXAI"
+LOCATION_VAR = "GOOGLE_CLOUD_LOCATION"
 
 
 def load_extension(root: Path) -> ModuleType:
@@ -55,16 +61,32 @@ def agent_dir(config: AppConfig, project_dir: Path) -> Path | None:
     return candidate if (candidate / "agent.py").is_file() else None
 
 
+def routed_specs(config: AppConfig) -> list[ModelSpec]:
+    """Every spec loop-spec may build an agent from: the working agent, phases, roles."""
+    providers = config.models.providers
+    keys = [
+        config.loop_spec.agent,
+        *config.loop_spec.phases.values(),
+        *config.loop_spec.roles.values(),
+    ]
+    return [providers[key] for key in keys]
+
+
 def environment(config: AppConfig, project_dir: Path) -> dict[str, str]:
-    """Every LOOP_SPEC_* variable our YAML resolves to."""
+    """Every variable our YAML resolves to for loop-spec's benefit."""
     providers = config.models.providers
     env: dict[str, str] = {}
     for phase, provider_key in config.loop_spec.phases.items():
-        env[f"LOOP_SPEC_PHASE_MODEL_{phase.name}"] = litellm_id(providers[provider_key])
+        env[f"LOOP_SPEC_PHASE_MODEL_{phase.name}"] = model_id(providers[provider_key], config)
     for role, provider_key in config.loop_spec.roles.items():
-        env[f"LOOP_SPEC_MODEL_{role.name}"] = litellm_id(providers[provider_key])
+        env[f"LOOP_SPEC_MODEL_{role.name}"] = model_id(providers[provider_key], config)
     for key, answer in config.loop_spec.supervisor.oracle.pins.items():
         env[f"LOOP_SPEC_ANSWER_{key.upper()}"] = answer
+    if any(spec.backend is Backend.AGENT_PLATFORM for spec in routed_specs(config)):
+        env[USE_VERTEX_VAR] = "true"
+        env[LOCATION_VAR] = config.gcp.location
+        if project := project_for(config):
+            env[PROJECT_VAR] = project
     if (mounted := agent_dir(config, project_dir)) is not None:
         env[AGENT_DIR_VAR] = str(mounted)
     return env
@@ -89,11 +111,13 @@ def build_working_agent(config: AppConfig, project_dir: Path) -> tuple[LlmAgent,
     that the agent's shell tool reads — so both must be installed on the same
     App together, never separately.
     """
+    for spec in routed_specs(config):
+        require_credentials(spec, config)
     export_environment(config, project_dir)
     extension = load_extension(config.loop_spec.root)
     bridge = extension.LoopSpecBridge(project_dir)
     agent = extension.build_agent(
-        model=litellm_id(config.models.providers[config.loop_spec.agent]),
+        model=model_id(config.models.providers[config.loop_spec.agent], config),
         bridge=bridge,
     )
     return agent, extension.LoopSpecPlugin(bridge)

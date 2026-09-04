@@ -14,17 +14,23 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class Provider(enum.StrEnum):
-    """Model vendors this app knows how to drive through LiteLLM."""
+    """Model vendors this app knows how to drive."""
 
     GEMINI = "gemini"
     ANTHROPIC = "anthropic"
 
 
 class Backend(enum.StrEnum):
-    """Where a provider's models are served from."""
+    """Where a provider's models are served from.
 
-    API_KEY = "api-key"  # the vendor's own API, authenticated by API key
-    AGENT_PLATFORM = "agent-platform"  # Google Cloud Agent Platform (formerly Vertex AI)
+    ``agent-platform`` is the default: Google Cloud Agent Platform (formerly
+    Vertex AI), authenticated with Application Default Credentials (ADC) and
+    driven through ADK's native Gemini and Claude model classes. ``api-key`` is
+    the vendor's own API, driven through LiteLLM with the vendor's key.
+    """
+
+    AGENT_PLATFORM = "agent-platform"
+    API_KEY = "api-key"
 
 
 class AgentRole(enum.StrEnum):
@@ -32,6 +38,7 @@ class AgentRole(enum.StrEnum):
 
     INTAKE = "intake"
     QA = "qa"
+    MANAGER = "manager"
 
 
 class ServiceBackend(enum.StrEnum):
@@ -39,6 +46,25 @@ class ServiceBackend(enum.StrEnum):
 
     IN_MEMORY = "in-memory"
     AGENT_PLATFORM = "agent-platform"
+
+
+class ThinkingLevel(enum.StrEnum):
+    """Gemini's thinking depth (``ThinkingConfig.thinking_level``)."""
+
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class Effort(enum.StrEnum):
+    """Claude's adaptive thinking effort (``AnthropicGenerateContentConfig.effort``)."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
 
 
 class LoopSpecPhase(enum.StrEnum):
@@ -77,17 +103,61 @@ class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class GcpConfig(_Frozen):
+    """The Google Cloud project and region every Agent Platform call targets.
+
+    ADC supplies the identity (``gcloud auth application-default login`` on a
+    workstation, the attached service account in production); this block only
+    says where. ``project`` falls back to ``$GOOGLE_CLOUD_PROJECT``.
+    """
+
+    project: str | None = None
+    location: str = "us-central1"
+
+
+class GenerationConfig(_Frozen):
+    """Generation settings for one model, applied through ADK's typed config.
+
+    ``thinking_level`` is Gemini-only and ``effort`` is Claude-only; the model
+    spec's validator enforces the pairing so a typo never silently disables
+    thinking.
+    """
+
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+    thinking_level: ThinkingLevel | None = None
+    effort: Effort | None = None
+    include_thoughts: bool = False
+
+
 class ModelSpec(_Frozen):
     """One nameable model: a vendor, a serving backend, and a model id.
 
-    ``extra`` is passed verbatim to LiteLLM (``thinking``, ``temperature``,
-    ``api_base``, ...) so generation settings live beside the model they tune.
+    ``location`` overrides ``gcp.location`` for this model alone (Claude on
+    Agent Platform is served from fewer regions than Gemini). ``extra`` is
+    passed verbatim to LiteLLM and is therefore only valid on the api-key
+    backend; the agent-platform backend takes its settings from ``generation``.
     """
 
     provider: Provider
-    backend: Backend
+    backend: Backend = Backend.AGENT_PLATFORM
     model: str
+    location: str | None = None
+    generation: GenerationConfig = GenerationConfig()
     extra: dict[str, Scalar | dict[str, Scalar]] = {}
+
+    @model_validator(mode="after")
+    def _settings_match_the_provider_and_backend(self) -> Self:
+        if self.generation.thinking_level is not None and self.provider is not Provider.GEMINI:
+            raise ValueError(f"generation.thinking_level is Gemini-only, not for {self.provider}")
+        if self.generation.effort is not None and self.provider is not Provider.ANTHROPIC:
+            raise ValueError(f"generation.effort is Claude-only, not for {self.provider}")
+        if self.extra and self.backend is not Backend.API_KEY:
+            raise ValueError(
+                "extra is passed to LiteLLM and only applies to backend: api-key; "
+                "use generation for the agent-platform backend"
+            )
+        return self
 
 
 class ModelsConfig(_Frozen):
@@ -114,10 +184,8 @@ class ModelsConfig(_Frozen):
 
 
 class AgentPlatformConfig(_Frozen):
-    """Google Cloud coordinates for Agent Platform sessions and Memory Bank."""
+    """The Agent Engine that hosts sessions and Memory Bank (project and region come from gcp)."""
 
-    project: str | None = None  # None -> $GOOGLE_CLOUD_PROJECT at service build
-    location: str = "us-central1"
     agent_engine_id: str | None = None
 
 
@@ -151,9 +219,9 @@ class ExposeConfig(_Frozen):
     """Where this instance serves its own A2A endpoint, and how callers prove themselves.
 
     ``token_env`` names the environment variable holding the bearer token every
-    request (except the public agent card) must carry. Unset means no auth —
-    only acceptable on a loopback host, because the exposed graph includes the
-    engineer agent and its shell.
+    request (except the public agent card and the health check) must carry.
+    Unset means no auth — only acceptable on a loopback host, because the
+    exposed graph includes the engineer agent and its shell.
     """
 
     host: str = "127.0.0.1"
@@ -200,12 +268,29 @@ class OraclePolicy(_Frozen):
 
 
 class SupervisorConfig(_Frozen):
-    """Policy for unattended runs: the four ports' knobs."""
+    """Policy for unattended runs: the oracle, store, and sink ports."""
 
     oracle: OraclePolicy = OraclePolicy()
     store_dir: Path | None = None  # mirror feature state here (state-store port)
     events_file: Path | None = None  # append every cycle event here (event-sink port)
-    max_handoffs: int = 25
+
+
+class ManagerConfig(_Frozen):
+    """The manager loop: one loop-spec phase per round, judged between rounds.
+
+    ``phase_prompt`` is appended to every hand-off to the implementer. It asks
+    for the phase to be done "extremely well", not "perfectly": the former
+    lets the implementer close a phase once it is good enough, the latter sends
+    it back into the minutiae. ``stall_rounds`` is how many rounds may pass
+    with no new checklist tick before the manager is told to move the cycle on;
+    ``max_rounds`` bounds the whole loop before a human is asked.
+    """
+
+    phase_prompt: str = (
+        "Complete the current loop-spec phase completely and extremely well, then hand off."
+    )
+    stall_rounds: int = 3
+    max_rounds: int = 25
 
 
 class LoopSpecConfig(_Frozen):
@@ -217,6 +302,7 @@ class LoopSpecConfig(_Frozen):
     phases: dict[LoopSpecPhase, str] = {}
     roles: dict[LoopSpecRole, str] = {}
     supervisor: SupervisorConfig = SupervisorConfig()
+    manager: ManagerConfig = ManagerConfig()
 
 
 class AppMeta(_Frozen):
@@ -229,6 +315,7 @@ class AppConfig(_Frozen):
     """The whole validated configuration file."""
 
     app: AppMeta = AppMeta()
+    gcp: GcpConfig = GcpConfig()
     models: ModelsConfig
     services: ServicesConfig = ServicesConfig()
     a2a: A2AConfig = A2AConfig()

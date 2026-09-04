@@ -1,63 +1,78 @@
 # Every knob for the dev-team app lives in this file. Environment variables
-# carry secrets only (GOOGLE_API_KEY, ANTHROPIC_API_KEY, DEVTEAM_A2A_TOKEN,
-# gcloud ADC); this file carries shape. A .env file in the working directory is
-# loaded automatically. `devteam check` validates it without touching any network.
+# carry secrets only; this file carries shape. A .env file in the working
+# directory is loaded automatically. `devteam check` validates it without
+# touching any network.
+#
+# Authentication defaults to Application Default Credentials (ADC) against
+# Google Cloud Agent Platform, formerly Vertex AI: run
+# `gcloud auth application-default login` on a workstation, or attach a
+# service account in production. Only the opt-in api-key backend needs a key
+# (GOOGLE_API_KEY / ANTHROPIC_API_KEY). DEVTEAM_A2A_TOKEN protects `devteam serve`.
 
 app:
   name: devteam
   tool_retries: 3 # failed tool calls are reflected on and retried this many times
   resumable: true # interrupted invocations can be resumed by id
 
+gcp:
+  project: null # null -> $GOOGLE_CLOUD_PROJECT
+  location: us-central1 # default region for models, sessions, and Memory Bank
+
 models:
   # A provider entry names one model and where it is served:
-  #   provider: gemini | anthropic
-  #   backend:  api-key        the vendor's own API (GOOGLE_API_KEY / ANTHROPIC_API_KEY)
-  #             agent-platform Google Cloud Agent Platform, formerly Vertex AI (ADC)
-  #   extra:    passed verbatim to LiteLLM (thinking, temperature, api_base, ...)
-  # Every entry is driven through LiteLLM, so one config swaps vendors and
-  # backends without touching code.
+  #   provider:   gemini | anthropic
+  #   backend:    agent-platform  (default) Agent Platform through ADK's native model
+  #                               classes, authenticated with ADC
+  #               api-key         the vendor's own API through LiteLLM
+  #                               (GOOGLE_API_KEY / ANTHROPIC_API_KEY)
+  #   location:   overrides gcp.location for this model (Claude is served from fewer regions)
+  #   generation: typed settings applied through ADK's GenerateContentConfig:
+  #               temperature, max_output_tokens, thinking_level (Gemini),
+  #               effort (Claude), include_thoughts
+  #   extra:      passed verbatim to LiteLLM; api-key backend only
   providers:
     gemini-flash:
       provider: gemini
-      backend: api-key
       model: gemini-3.8-flash
     gemini-pro:
       provider: gemini
-      backend: api-key
       model: gemini-3.1-pro-preview
+      generation:
+        thinking_level: high
     claude:
       provider: anthropic
-      backend: api-key
-      model: claude-opus-5
-      extra:
-        thinking: { type: adaptive }
-    # claude-on-gcp:
+      model: claude-opus-5 # current-generation Claude uses bare ids on Agent Platform
+      location: us-east5
+      generation:
+        effort: high
+    # claude-api:
     #   provider: anthropic
-    #   backend: agent-platform
-    #   model: claude-opus-5        # current-generation Claude uses bare ids on Agent Platform
+    #   backend: api-key
+    #   model: claude-opus-5
+    #   extra:
+    #     thinking: { type: adaptive }
 
-  # Which provider entry each of this app's own agents uses (intake, qa).
+  # Which provider entry each of this app's own agents uses.
   agents:
-    intake: gemini-flash
-    qa: claude
+    intake: gemini-flash # classifies requests
+    qa: claude # answers questions from memory and peers
+    manager: gemini-pro # judges each loop-spec phase hand-off
 
 services:
   # in-memory:      no persistence, no cloud, the default; ideal for tests.
-  # agent-platform: Agent Engine sessions + Memory Bank on Google Cloud.
+  # agent-platform: Agent Engine sessions + Memory Bank on Google Cloud (gcp.project / location).
   backend: in-memory
   agent_platform:
-    project: null # null -> $GOOGLE_CLOUD_PROJECT
-    location: us-central1
     agent_engine_id: null # required when backend is agent-platform
 
 a2a:
-  # `devteam serve` exposes the WHOLE graph — intake, the loop-spec engineer
-  # (an unsandboxed shell on this container's repository), and Q&A — so peers
-  # can hand this team the work it owns.
+  # `devteam serve` exposes the WHOLE graph — intake, the manager loop with
+  # its loop-spec engineer (an unsandboxed shell on this container's
+  # repository), and Q&A — so peers can hand this team the work it owns.
   expose:
     host: 127.0.0.1
     port: 8001
-    # Every request except the public agent card must carry
+    # Every request except the public agent card and /healthz must carry
     # `Authorization: Bearer $DEVTEAM_A2A_TOKEN`. Set to null to disable (loopback only).
     token_env: DEVTEAM_A2A_TOKEN
     # Serve HTTPS directly between containers (null when an ingress terminates TLS).
@@ -84,7 +99,7 @@ loop_spec:
   mount: adk_agents
   # Provider entry for the mounted loop-spec working agent.
   agent: gemini-pro
-  # Optional per-phase and per-role model routing, resolved to LiteLLM ids and
+  # Optional per-phase and per-role model routing, resolved to ADK model ids and
   # exported as LOOP_SPEC_PHASE_MODEL_<PHASE> / LOOP_SPEC_MODEL_<ROLE>
   # (docs/loop-spec/configuration.md in the loop-spec tree). A role entry wins
   # over its phase entry.
@@ -104,4 +119,11 @@ loop_spec:
       pins: {} # LOOP_SPEC_ANSWER_<KEY>: value, answered before any question
     store_dir: null # mirror feature state here so an ephemeral container survives death
     events_file: null # append every cycle event line here
-    max_handoffs: 25
+
+  # The manager loop: one loop-spec phase per round, judged between rounds.
+  manager:
+    # Appended to every hand-off. "Extremely well" lets the implementer close a
+    # phase once it is good enough; "perfectly" sends it back into the minutiae.
+    phase_prompt: Complete the current loop-spec phase completely and extremely well, then hand off.
+    stall_rounds: 3 # rounds with no new checklist tick before the manager moves the cycle on
+    max_rounds: 25 # rounds before a human is asked whether to continue

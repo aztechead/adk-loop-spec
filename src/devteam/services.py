@@ -2,17 +2,18 @@
 
 Two backends, one seam: ``in-memory`` for local runs and tests, and
 ``agent-platform`` (Google Cloud Agent Platform, formerly Vertex AI) for
-durable sessions plus Memory Bank. Both sides of the pair always come from the
-same backend so a session and its extracted memories never split across stores.
+durable sessions plus Memory Bank, authenticated with ADC. Both sides of the
+pair always come from the same backend so a session and its extracted
+memories never split across stores.
 """
 
-import os
 from typing import NamedTuple, assert_never
 
 from google.adk.memory import BaseMemoryService, InMemoryMemoryService, VertexAiMemoryBankService
 from google.adk.sessions import BaseSessionService, InMemorySessionService, VertexAiSessionService
 
-from .config import AppConfig, ServiceBackend
+from devteam.config import AppConfig, ServiceBackend
+from devteam.models import ADC_HINT, PROJECT_VAR, project_for
 
 
 class RunnerServices(NamedTuple):
@@ -32,23 +33,19 @@ def build_services(config: AppConfig) -> RunnerServices:
         case ServiceBackend.IN_MEMORY:
             return RunnerServices(InMemorySessionService(), InMemoryMemoryService())
         case ServiceBackend.AGENT_PLATFORM:
-            platform = config.services.agent_platform
-            project = platform.project or os.environ.get("GOOGLE_CLOUD_PROJECT")
+            project = project_for(config)
             if not project:
                 raise RuntimeError(
-                    "services.backend is agent-platform but neither "
-                    "services.agent_platform.project nor $GOOGLE_CLOUD_PROJECT is set"
+                    "services.backend is agent-platform but neither gcp.project nor "
+                    f"${PROJECT_VAR} is set (ADC supplies the identity: {ADC_HINT})"
                 )
+            engine = config.services.agent_platform.agent_engine_id
             return RunnerServices(
                 VertexAiSessionService(
-                    project=project,
-                    location=platform.location,
-                    agent_engine_id=platform.agent_engine_id,
+                    project=project, location=config.gcp.location, agent_engine_id=engine
                 ),
                 VertexAiMemoryBankService(
-                    project=project,
-                    location=platform.location,
-                    agent_engine_id=platform.agent_engine_id,
+                    project=project, location=config.gcp.location, agent_engine_id=engine
                 ),
             )
         case _:

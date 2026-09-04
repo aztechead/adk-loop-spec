@@ -2,10 +2,10 @@
 
 The exposed agent is a deterministic function-only Workflow so the whole
 protocol — card discovery, bearer auth, TLS, task submission, response — runs
-offline. This is the same wiring `devteam serve` and the YAML peer list use,
-minus the LLMs. The last test drives the real dev-team graph with a scripted
-intake that assigns the request to the peer, proving the PEER route forwards
-the user's words to the other instance.
+offline on the same FastAPI application `devteam serve` builds, minus the
+LLMs. The last test drives the real dev-team graph with a scripted intake that
+assigns the request to the peer, proving the PEER route forwards the user's
+words to the other instance.
 """
 
 import datetime as dt
@@ -25,16 +25,15 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from google.adk import Event, Workflow
-from google.adk.a2a.utils.agent_to_a2a import to_a2a
 from google.adk.agents import LlmAgent
 from google.adk.agents.remote_a2a_agent import AGENT_CARD_WELL_KNOWN_PATH
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from devteam.a2a import BearerAuth
+from devteam.a2a import HEALTH_PATH, build_api
 from devteam.agents import build_peer_agent
-from devteam.config import PeerConfig
+from devteam.config import ExposeConfig, PeerConfig, TlsConfig
 from devteam.graph import make_router, peer_route
 from tests.conftest import ScriptedLlm
 
@@ -107,11 +106,13 @@ def peer(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Peer]:
     tls = request.param == "https"
     certfile, keyfile = self_signed(tmp_path) if tls else (None, None)
     workflow = Workflow(name="echo_peer", edges=[("START", echo)])
-    server_app = BearerAuth(
-        to_a2a(workflow, host=HOST, port=port, protocol=request.param),
-        TOKEN,
-        frozenset({AGENT_CARD_WELL_KNOWN_PATH}),
+    expose = ExposeConfig(
+        host=HOST,
+        port=port,
+        tls=TlsConfig(certfile=certfile, keyfile=keyfile) if certfile and keyfile else None,
     )
+    runner = Runner(node=workflow, app_name="echo_peer", session_service=InMemorySessionService())
+    server_app = build_api(workflow, runner, expose, TOKEN)
     server = uvicorn.Server(
         uvicorn.Config(
             server_app,
@@ -168,10 +169,13 @@ async def test_remote_peer_answers_with_the_token(
     assert any("peer echo" in t and "hello team" in t for t in texts), texts
 
 
-def test_agent_card_is_public_but_the_endpoint_is_not(peer: Peer) -> None:
+def test_card_and_health_are_public_but_the_endpoint_is_not(peer: Peer) -> None:
     body = {"jsonrpc": "2.0", "id": 1, "method": "x"}
     assert httpx.get(peer.url + AGENT_CARD_WELL_KNOWN_PATH, verify=peer.verify()).status_code == 200
+    health = httpx.get(peer.url + HEALTH_PATH, verify=peer.verify())
+    assert health.status_code == 200 and health.json() == {"status": "ok", "app": "echo_peer"}
     assert httpx.post(peer.url + "/", json=body, verify=peer.verify()).status_code == 401
+    assert httpx.get(peer.url + "/progress/u/s", verify=peer.verify()).status_code == 401
     allowed = httpx.post(
         peer.url + "/",
         json=body,
@@ -179,6 +183,12 @@ def test_agent_card_is_public_but_the_endpoint_is_not(peer: Peer) -> None:
         verify=peer.verify(),
     )
     assert allowed.status_code != 401
+    missing = httpx.get(
+        peer.url + "/progress/u/s",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        verify=peer.verify(),
+    )
+    assert missing.status_code == 404
 
 
 async def test_graph_forwards_a_peers_request_to_that_peer(

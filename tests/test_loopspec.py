@@ -13,33 +13,45 @@ def test_environment_follows_the_loop_spec_contract(tmp_path: Path) -> None:
     raw = base_raw() | {
         "models": {
             "providers": {
-                "gemini-pro": {
-                    "provider": "gemini",
-                    "backend": "api-key",
-                    "model": "gemini-2.5-pro",
-                },
+                "gemini-pro": {"provider": "gemini", "model": "gemini-2.5-pro"},
                 "claude": {
+                    "provider": "anthropic",
+                    "model": "claude-opus-5",
+                    "location": "us-east5",
+                },
+                "claude-api": {
                     "provider": "anthropic",
                     "backend": "api-key",
                     "model": "claude-opus-5",
                 },
             },
-            "agents": {"intake": "gemini-pro", "qa": "claude"},
+            "agents": {"intake": "gemini-pro", "qa": "claude", "manager": "gemini-pro"},
         },
         "loop_spec": {
-            "phases": {"spec": "claude", "plan": "claude", "execute": "gemini-pro"},
+            "phases": {"spec": "claude", "plan": "claude-api", "execute": "gemini-pro"},
             "roles": {"implementer": "gemini-pro", "code_reviewer": "claude"},
             "supervisor": {"oracle": {"pins": {"style": "compact"}}},
         },
     }
+    claude_on_vertex = "Claude:projects/offline-project/locations/us-east5/publishers/anthropic/models/claude-opus-5"
     assert environment(AppConfig.model_validate(raw), tmp_path) == {
-        "LOOP_SPEC_PHASE_MODEL_SPEC": "anthropic/claude-opus-5",
+        "LOOP_SPEC_PHASE_MODEL_SPEC": claude_on_vertex,
         "LOOP_SPEC_PHASE_MODEL_PLAN": "anthropic/claude-opus-5",
-        "LOOP_SPEC_PHASE_MODEL_EXECUTE": "gemini/gemini-2.5-pro",
-        "LOOP_SPEC_MODEL_IMPLEMENTER": "gemini/gemini-2.5-pro",
-        "LOOP_SPEC_MODEL_CODE_REVIEWER": "anthropic/claude-opus-5",
+        "LOOP_SPEC_PHASE_MODEL_EXECUTE": "gemini-2.5-pro",
+        "LOOP_SPEC_MODEL_IMPLEMENTER": "gemini-2.5-pro",
+        "LOOP_SPEC_MODEL_CODE_REVIEWER": claude_on_vertex,
         "LOOP_SPEC_ANSWER_STYLE": "compact",
+        "GOOGLE_GENAI_USE_VERTEXAI": "true",
+        "GOOGLE_CLOUD_PROJECT": "offline-project",
+        "GOOGLE_CLOUD_LOCATION": "us-central1",
     }
+
+
+def test_api_key_only_routes_export_no_vertex_variables(tmp_path: Path) -> None:
+    raw = base_raw()
+    raw["models"]["providers"]["gemini-pro"]["backend"] = "api-key"  # type: ignore[index]
+    env = environment(AppConfig.model_validate(raw), tmp_path)
+    assert env == {}
 
 
 def test_cli_mount_is_exported_when_present(config: AppConfig, tmp_path: Path) -> None:

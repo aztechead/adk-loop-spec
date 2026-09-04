@@ -10,10 +10,12 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+from google.adk.events import Event
 
-from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
-from .loopspec import AGENT_DIR_VAR, environment
-from .models import litellm_id
+from devteam.agents import QaAnswer
+from devteam.config import DEFAULT_CONFIG_PATH, AppConfig, load_config
+from devteam.loopspec import AGENT_DIR_VAR, environment
+from devteam.models import MissingCredentialsError, model_id, project_for
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -34,11 +36,20 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
 def cmd_check(config: AppConfig, args: argparse.Namespace) -> int:
     """Validate the config and show every resolved route. No network."""
     print(f"app: {config.app.name}")
+    print(f"gcp: project={project_for(config) or '(unset)'} location={config.gcp.location}")
     print(f"services: {config.services.backend}")
-    for agent, provider_key in sorted(config.models.agents.items()):
-        print(f"agent {agent}: {litellm_id(config.models.providers[provider_key])}")
-    print(f"loop-spec agent: {litellm_id(config.models.providers[config.loop_spec.agent])}")
-    env = environment(config, args.project_dir)
+    providers = config.models.providers
+    routes = [
+        *((f"agent {role}", key) for role, key in sorted(config.models.agents.items())),
+        ("loop-spec agent", config.loop_spec.agent),
+    ]
+    try:
+        for label, key in routes:
+            print(f"{label}: {model_id(providers[key], config)}")
+        env = environment(config, args.project_dir)
+    except MissingCredentialsError as error:
+        print(f"warning: {error}")
+        env = {}
     for name, value in sorted(env.items()):
         print(f"{name}={value}")
     if AGENT_DIR_VAR not in env:
@@ -52,10 +63,24 @@ def cmd_check(config: AppConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+def print_event(event: Event) -> None:
+    """One line per text part; the Q&A agent's typed answer is unwrapped."""
+    for part in (event.content.parts if event.content else None) or []:
+        if not part.text:
+            continue
+        text = part.text
+        if event.author == "qa":
+            try:
+                text = QaAnswer.model_validate_json(part.text).answer
+            except ValueError:
+                pass
+        print(f"[{event.author}] {text}")
+
+
 def cmd_chat(config: AppConfig, args: argparse.Namespace) -> int:
     """Send one message through the request graph and print the responses."""
-    from .app import build_runner  # deferred: builds the loop-spec mount
-    from .runtime import policy_oracle, run_turn, text_message
+    from devteam.app import build_runner  # deferred: builds the loop-spec mount
+    from devteam.runtime import policy_oracle, run_turn, text_message
 
     async def run() -> None:
         runner = build_runner(config, args.project_dir)
@@ -69,25 +94,23 @@ def cmd_chat(config: AppConfig, args: argparse.Namespace) -> int:
             message=text_message(args.message),
             oracle=policy_oracle(config.loop_spec.supervisor.oracle),
         ):
-            for part in (event.content.parts if event.content else None) or []:
-                if part.text:
-                    print(f"[{event.author}] {part.text}")
+            print_event(event)
 
     asyncio.run(run())
     return 0
 
 
 def cmd_serve(config: AppConfig, args: argparse.Namespace) -> int:
-    """Expose this instance's Q&A agent to its peers over A2A."""
-    from .a2a import serve  # deferred: builds services
+    """Expose this instance's graph to its peers over A2A."""
+    from devteam.a2a import serve  # deferred: builds services
 
     serve(config, args.project_dir)
     return 0
 
 
 def cmd_supervise(config: AppConfig, args: argparse.Namespace) -> int:
-    """Run one loop-spec task unattended and report the terminal verdict."""
-    from .supervisor import Supervisor  # deferred: builds the loop-spec mount
+    """Run one task through the manager loop unattended and report the terminal verdict."""
+    from devteam.supervisor import Supervisor  # deferred: builds the loop-spec mount
 
     result = asyncio.run(Supervisor(config, args.project_dir.resolve()).run(args.task))
     print(
@@ -113,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     serve = commands.add_parser("serve", help="serve the A2A endpoint")
     serve.set_defaults(handler=cmd_serve)
 
-    supervise = commands.add_parser("supervise", help="run a loop-spec task unattended")
+    supervise = commands.add_parser("supervise", help="run a task through the manager loop")
     supervise.add_argument("task")
     supervise.set_defaults(handler=cmd_supervise)
 
