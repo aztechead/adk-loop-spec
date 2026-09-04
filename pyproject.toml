@@ -1,0 +1,57 @@
+[project]
+name = "devteam"
+version = "0.1.0"
+description = "Exemplar Google ADK dev-team assistant: LiteLLM (Gemini + Claude, 1p or Agent Platform), A2A peers, Memory Bank, graph workflows, and the loop-spec plugin."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "anthropic>=0.78",
+    "fastapi>=0.115",
+    "google-adk[a2a]>=2.7,<3",
+    "litellm>=1.84",
+    "pyyaml>=6",
+    "python-dotenv>=1",
+]
+
+[project.optional-dependencies]
+gcp = ["google-adk[gcp]>=2.7,<3"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "pyright>=1.1",
+]
+
+[project.scripts]
+devteam = "devteam.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/devteam"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+extend-select = ["I", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+# Absolute imports only: every module names its package in full.
+ban-relative-imports = "all"
+
+[tool.pyright]
+pythonVersion = "3.14"
+venvPath = "."
+venv = ".venv"
+include = ["src", "tests"]
+typeCheckingMode = "standard"
