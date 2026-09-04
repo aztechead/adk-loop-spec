@@ -38,10 +38,16 @@ def cmd_check(config: AppConfig, args: argparse.Namespace) -> int:
     print(f"app: {config.app.name}")
     print(f"gcp: project={project_for(config) or '(unset)'} location={config.gcp.location}")
     print(f"services: {config.services.backend}")
+    parallel = config.loop_spec.manager.parallel
+    print(
+        f"parallel: {'on' if parallel.enabled else 'off'} "
+        f"(max {parallel.max_parallel_implementers} implementers per wave)"
+    )
     providers = config.models.providers
     routes = [
         *((f"agent {role}", key) for role, key in sorted(config.models.agents.items())),
         ("loop-spec agent", config.loop_spec.agent),
+        ("parallel implementer", config.loop_spec.implementer_key),
     ]
     try:
         for label, key in routes:

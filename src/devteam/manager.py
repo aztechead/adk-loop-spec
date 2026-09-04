@@ -20,7 +20,10 @@ VERIFY, ITERATE, DELIVER):
   paused ``phase-handoff`` result.
 - ``observe`` is deterministic code: it reads loop-spec's result and PLAN
   checklist, appends a tick count to the progress ledger in session state,
-  and flags a stall (no new tick for ``stall_rounds`` rounds).
+  and flags a stall (no new tick for ``stall_rounds`` rounds). When PLAN has
+  just handed off and ``manager.parallel`` is on, it detours through the
+  fan-out nodes (:mod:`devteam.fanout`): plan waves, run each wave of
+  implementers at once, integrate, repeat, then judge.
 - ``manager`` is an LlmAgent with a typed verdict: continue, move on, or halt,
   plus one paragraph of guidance the next hand-off carries.
 - ``route_round`` is code again: a terminal result ends the loop, a halt or an
@@ -45,6 +48,7 @@ from pydantic import BaseModel, Field
 
 from devteam.config import AgentRole, AppConfig
 from devteam.cycle import Checklist, CycleResult, read_checklist, read_last_result
+from devteam.fanout import RUN_ROUTE, ImplementerFactory, WaveSummary, build_wave_nodes
 from devteam.models import model_for_agent
 
 AUTO_PROMPT = "Load the loop-spec auto skill and run: {task}"
@@ -52,8 +56,10 @@ RESUME_PROMPT = "Load the loop-spec cycle skill and run: autonomous"
 
 CONTINUE_ROUTE = "CONTINUE"
 JUDGE_ROUTE = "JUDGE"
+WAVES_ROUTE = "WAVES"
 ASK_ROUTE = "ASK"
 DONE_ROUTE = "DONE"
+PLAN_PHASE = "plan"
 
 # Session-state keys; the checklist page and the supervisor read them back.
 ROUND_KEY = "manager_round"
@@ -114,6 +120,9 @@ class RoundReport(BaseModel):
     ledger: Ledger
     stalled: bool
     exhausted: bool
+    waves: WaveSummary | None = Field(
+        default=None, description="What the parallel fan-out merged or blocked after PLAN."
+    )
 
 
 class HumanDecision(BaseModel):
@@ -154,7 +163,8 @@ def build_manager_agent(config: AppConfig) -> LlmAgent:
             "You manage an implementer that runs a loop-spec cycle one phase at a time.\n"
             "You receive a round report: the cycle result after the last phase, the PLAN "
             "checklist with which tasks are done, the progress ledger (ticks per round), "
-            "and whether the run is stalled or out of rounds.\n"
+            "and whether the run is stalled or out of rounds. After PLAN the report may "
+            "carry waves: which tasks parallel implementers merged and which were blocked.\n"
             "Decide CONTINUE when the phase advanced or boxes were ticked. "
             "Decide MOVE_ON when stalled is true: the implementer must close the current "
             "phase with what it has instead of polishing. "
@@ -197,10 +207,20 @@ def halted_result(reason: str) -> CycleResult:
     return CycleResult(status="paused", outcome="halted", reason=reason, converged=False)
 
 
-def build_manager_loop(config: AppConfig, project_dir: Path, implementer: BaseNode) -> Workflow:
-    """The manager loop over ``implementer`` (the mounted loop-spec working agent)."""
+def build_manager_loop(
+    config: AppConfig,
+    project_dir: Path,
+    implementer: BaseNode,
+    implementer_factory: ImplementerFactory | None = None,
+) -> Workflow:
+    """The manager loop over ``implementer`` (the mounted loop-spec working agent).
+
+    ``implementer_factory`` overrides how parallel task implementers are built;
+    tests use it to stand in for the model-backed ones.
+    """
     manager_config = config.loop_spec.manager
     loop_spec_root = config.loop_spec.root
+    waves = build_wave_nodes(config, project_dir, RoundReport, REPORT_KEY, implementer_factory)
 
     def brief(ctx: Context, node_input: object) -> str:
         """Round zero: reset the ledger and route the task into loop-spec."""
@@ -246,8 +266,10 @@ def build_manager_loop(config: AppConfig, project_dir: Path, implementer: BaseNo
                 actions=EventActions(route=[DONE_ROUTE]),
                 output=report.result.model_dump(mode="json", by_alias=True),
             )
+        fan_out = manager_config.parallel.enabled and result.handed_off_after(PLAN_PHASE)
         return Event(
-            actions=EventActions(route=[JUDGE_ROUTE]), output=report.model_dump(mode="json")
+            actions=EventActions(route=[WAVES_ROUTE if fan_out else JUDGE_ROUTE]),
+            output=report.model_dump(mode="json"),
         )
 
     def route_round(ctx: Context, node_input: object) -> Event:
@@ -311,7 +333,10 @@ def build_manager_loop(config: AppConfig, project_dir: Path, implementer: BaseNo
             ("START", brief),
             (brief, implementer),
             (implementer, observe),
-            (observe, {JUDGE_ROUTE: manager, DONE_ROUTE: finish}),
+            (observe, {JUDGE_ROUTE: manager, WAVES_ROUTE: waves.plan, DONE_ROUTE: finish}),
+            (waves.plan, {RUN_ROUTE: waves.execute, JUDGE_ROUTE: manager}),
+            (waves.execute, waves.integrate),
+            (waves.integrate, {RUN_ROUTE: waves.execute, JUDGE_ROUTE: manager}),
             (manager, route_round),
             (route_round, {CONTINUE_ROUTE: implementer, ASK_ROUTE: ask_human, DONE_ROUTE: finish}),
             (ask_human, resume_or_stop),
@@ -346,8 +371,19 @@ def render_progress(report: RoundReport | None, result: CycleResult | None) -> s
             else f"round {report.round}, phase {html.escape(report.result.phase_reached or '?')}"
             + (", stalled" if report.stalled else "")
         )
+        waves = ""
+        if report.waves is not None:
+            blocked = ", ".join(
+                f"{b.task_id} ({html.escape(b.reason)})" for b in report.waves.blocked
+            )
+            waves = (
+                f"<p>Parallel waves: {report.waves.waves_run} of {report.waves.waves_total} run; "
+                f"merged {', '.join(report.waves.merged) or 'none'}; "
+                f"blocked {blocked or 'none'}.</p>"
+            )
         body = (
             f"<p><strong>{checklist.ticked} of {checklist.total} boxes ticked</strong> ({status})</p>"
+            f"{waves}"
             f"<ul>{boxes or '<li>PLAN has not written tasks yet.</li>'}</ul>"
             f"<svg width='{len(ledger.entries) * 40 + 20}' height='120' role='img' "
             "aria-label='ticks over rounds'><polyline fill='none' stroke='#2a7' "

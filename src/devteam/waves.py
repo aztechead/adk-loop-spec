@@ -43,6 +43,7 @@ class WavePlan(BaseModel):
     """The ordered waves still to run, and which wave is next."""
 
     slug: str
+    branch: str = Field(description="The feature branch every task branch merges into.")
     waves: list[list[str]] = Field(default_factory=list, description="Task ids per wave.")
     next_wave: int = 0
 

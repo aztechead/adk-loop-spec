@@ -127,3 +127,11 @@ loop_spec:
     phase_prompt: Complete the current loop-spec phase completely and extremely well, then hand off.
     stall_rounds: 3 # rounds with no new checklist tick before the manager moves the cycle on
     max_rounds: 25 # rounds before a human is asked whether to continue
+    # After PLAN hands off, fan the task list out to parallel implementers:
+    # independent tasks run at once, each in its own git worktree; dependent
+    # tasks run in later waves; loop-spec's integrate script merges each one and
+    # marks it done, so its own EXECUTE phase skips the published tasks.
+    parallel:
+      enabled: true
+      max_parallel_implementers: 4
+      implementer: null # provider entry; null -> loop_spec.roles.implementer, then loop_spec.agent

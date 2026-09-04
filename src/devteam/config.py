@@ -275,6 +275,20 @@ class SupervisorConfig(_Frozen):
     events_file: Path | None = None  # append every cycle event here (event-sink port)
 
 
+class ParallelConfig(_Frozen):
+    """Fan PLAN tasks out to parallel implementers after loop-spec's PLAN phase.
+
+    Independent tasks run at once, each in its own git worktree; dependent
+    tasks run in later waves; every merged task is marked done so loop-spec's
+    own EXECUTE phase skips it. ``implementer`` names a provider entry and
+    falls back to ``loop_spec.roles.implementer``, then ``loop_spec.agent``.
+    """
+
+    enabled: bool = False
+    max_parallel_implementers: int = 4
+    implementer: str | None = None
+
+
 class ManagerConfig(_Frozen):
     """The manager loop: one loop-spec phase per round, judged between rounds.
 
@@ -291,6 +305,7 @@ class ManagerConfig(_Frozen):
     )
     stall_rounds: int = 3
     max_rounds: int = 25
+    parallel: ParallelConfig = ParallelConfig()
 
 
 class LoopSpecConfig(_Frozen):
@@ -303,6 +318,15 @@ class LoopSpecConfig(_Frozen):
     roles: dict[LoopSpecRole, str] = {}
     supervisor: SupervisorConfig = SupervisorConfig()
     manager: ManagerConfig = ManagerConfig()
+
+    @property
+    def implementer_key(self) -> str:
+        """The provider entry parallel implementers run on."""
+        return (
+            self.manager.parallel.implementer
+            or self.roles.get(LoopSpecRole.IMPLEMENTER)
+            or self.agent
+        )
 
 
 class AppMeta(_Frozen):
@@ -328,6 +352,7 @@ class AppConfig(_Frozen):
             ("loop_spec.agent", self.loop_spec.agent),
             *((f"loop_spec.phases.{p}", key) for p, key in self.loop_spec.phases.items()),
             *((f"loop_spec.roles.{r}", key) for r, key in self.loop_spec.roles.items()),
+            ("loop_spec.manager.parallel.implementer", self.loop_spec.implementer_key),
         ):
             if key not in known:
                 raise ValueError(

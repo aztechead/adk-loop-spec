@@ -44,6 +44,7 @@ class CycleResult(BaseModel):
     reason: str | None = None
     summary: str = ""
     slug: str | None = None
+    branch: str | None = None
     phase_reached: str | None = None
     converged: bool = False
     work_delivered: bool = False
@@ -58,6 +59,16 @@ class CycleResult(BaseModel):
     def is_handoff(self) -> bool:
         """The cycle paused after a durable phase and expects to be re-issued."""
         return self.status == HANDOFF_STATUS and self.reason == HANDOFF_REASON
+
+    def handed_off_after(self, phase: str) -> bool:
+        return self.is_handoff and (self.phase_reached or "").lower() == phase.lower()
+
+    @property
+    def feature_branch(self) -> str | None:
+        """The branch loop-spec publishes tasks onto: the record's, else loop-spec's default."""
+        if self.branch:
+            return self.branch
+        return f"feat/{self.slug}" if self.slug else None
 
 
 class ChecklistItem(BaseModel):

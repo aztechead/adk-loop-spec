@@ -35,6 +35,7 @@ user request
 | Sessions + Memory Bank, in-memory or Agent Platform, incremental commits | `src/devteam/services.py`, `src/devteam/app.py` |
 | A2A on FastAPI: the full graph, bearer auth, direct HTTPS, a progress page | `src/devteam/a2a.py` |
 | The manager loop: one loop-spec phase per round, a checklist ledger, a stall rule | `src/devteam/manager.py` |
+| Parallel implementers: PLAN tasks as waves, nested Workflow fan-out and join, per-task worktrees | `src/devteam/fanout.py`, `src/devteam/waves.py` |
 | App lifecycle: resumable invocations, reflect-and-retry on tool failure | `src/devteam/app.py` |
 | loop-spec mounted as the change-shipping engine, per-phase / per-role model routing | `src/devteam/loopspec.py` |
 | loop-spec's supervisor interface: oracle policy, store, sink, lifecycle | `src/devteam/supervisor.py`, `src/devteam/runtime.py` |
@@ -219,6 +220,45 @@ sends it back into the minutiae. `devteam serve` renders the ledger at
 `/progress/<user>/<session>` as a checklist page with a counter and ticks over
 time. Everything is tuned under `loop_spec.manager` in the YAML.
 
+### Parallel implementers
+
+When PLAN hands off and `loop_spec.manager.parallel.enabled` is on, the loop
+detours through three more nodes before the manager judges
+(`src/devteam/fanout.py`, `src/devteam/waves.py`):
+
+```
+observe ──(after PLAN)──▶ plan_waves ──▶ execute_wave ──▶ integrate_wave ──┬─▶ more waves ──▶ execute_wave
+                                                                           └─▶ manager ──▶ route_round ──▶ implementer (loop-spec resumes)
+```
+
+- **plan_waves** reads `features/<slug>/tasks.json` and orders it the way
+  loop-spec's EXECUTE does: declared `blockedBy` edges plus a synthetic edge
+  between any two tasks whose `files` overlap, lower id first. Each topological
+  layer is chunked to `max_parallel_implementers`. A dependency cycle is
+  reported to the manager as a blocked plan, never guessed around.
+- **execute_wave** creates one git worktree per task on `task/<id>-<slug>`
+  off the feature branch head, builds one implementer per worktree, and runs
+  the wave as a nested ADK `Workflow`: START fans out to every implementer, a
+  `JoinNode` waits for all of them, and `max_concurrency` caps the wave. The
+  wave runs through `ctx.run_node`, so an interrupted invocation resumes it.
+  Each implementer is a plain LlmAgent with ADK's `EnvironmentToolset` over a
+  `LocalEnvironment` rooted in its worktree, `include_contents="none"`, and a
+  typed `TaskReport {task_id, committed, sha, verify_passed, notes}` under
+  `output_key="task_report_<id>"`. It never touches the loop-spec bridge,
+  whose shell tool reads the active skill directory from one shared
+  session-state key.
+- **integrate_wave** merges in task order with loop-spec's own
+  `lib/integrate-task.sh` (rebase, verify command, fast-forward, cleanup),
+  then `lib/task-progress.sh mark-done`. A report with no commit is recorded
+  as blocked and never sent to the script. The manager sees the wave summary
+  in its round report; when loop-spec resumes, its EXECUTE phase seeds the
+  merged set from the done marks and dispatches nothing already published.
+
+Implementers run on `parallel.implementer`, else `loop_spec.roles.implementer`,
+else `loop_spec.agent`. The test suite runs the whole detour against a real
+git repository: three tasks in two waves, the integrate script, the done
+marks, and a task that commits nothing.
+
 ## The loop-spec mount
 
 loop-spec lives at `third_party/loop-spec` (git submodule) and is imported
@@ -266,6 +306,8 @@ src/devteam/
   agents.py             intake classifier, qa agent, authenticated A2A peers (typed outputs)
   graph.py              the request Workflow graph (routes, peer forwarding, typed human input)
   manager.py            the manager loop over loop-spec phases, ledger, stall rule, progress page
+  fanout.py             parallel implementers per wave: worktrees, nested Workflow, integration
+  waves.py              PLAN tasks into waves: dependency and file-overlap edges, chunking
   cycle.py              loop-spec's result and checklist files as typed records
   app.py                composition root: Apps, Runner, plugins, resumability
   runtime.py            one turn with get_user_choice answered by a YAML oracle policy
